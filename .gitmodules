@@ -1,0 +1,15 @@
+[submodule "implementations/mlkem-native"]
+	path = implementations/mlkem-native
+	url = https://github.com/pq-code-package/mlkem-native
+[submodule "implementations/mldsa-native"]
+	path = implementations/mldsa-native
+	url = https://github.com/pq-code-package/mldsa-native
+[submodule "implementations/slhdsa-c"]
+	path = implementations/slhdsa-c
+	url = https://github.com/pq-code-package/slhdsa-c
+[submodule "implementations/pqclean"]
+	path = implementations/pqclean
+	url = https://github.com/PQClean/PQClean
+[submodule "implementations/liboqs"]
+	path = implementations/liboqs
+	url = https://github.com/open-quantum-safe/liboqs

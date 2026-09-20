@@ -1,0 +1,34 @@
+# Editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Compiled binaries / object files
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+
+# Generated build directories
+build/
+cmake-build*/
+
+# Downloaded paper PDFs (kept local for reading, not redistributed via git)
+papers/pdfs/
