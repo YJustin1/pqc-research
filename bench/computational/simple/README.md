@@ -1,14 +1,16 @@
 # Simple: per-operation timing via liboqs' `speed_kem`
 
-A ~40 line Python wrapper around liboqs' `tests/speed_kem`. It measures
+A ~70 line Python wrapper around liboqs' `tests/speed_kem`. It measures
 nothing itself. It runs liboqs' benchmark once per algorithm, parses the
 table it prints, and collects the rows into one CSV.
 
 ```sh
-python3 bench/simple/speed_kem_totals.py [seconds_per_op]   # default 3
+python3 bench/computational/simple/speed_kem_totals.py [seconds_per_op]   # default 3
 ```
 
-Writes `bench/results/simple-speed_kem.csv` and prints the same table.
+Writes `bench/computational/results/simple-speed_kem.csv` and prints the
+same table. The committed `simple-speed_kem-grape-nuts.csv` is that output
+from the `grape-nuts` host, renamed with a host suffix.
 
 Algorithms benchmarked, set by `ALGS` in the script: ML-KEM-512/768/1024,
 Classic-McEliece-348864/6688128, NTRU-HPS-2048-509, NTRU-HRSS-701.
@@ -19,10 +21,10 @@ Classic-McEliece-348864/6688128, NTRU-HPS-2048-509, NTRU-HRSS-701.
 `OQS_BUILD_ONLY_LIB=ON`:
 
 ```sh
-cmake -S implementations/liboqs -B bench/build/liboqs \
+cmake -S implementations/liboqs -B bench/computational/build/liboqs \
       -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=OFF \
       -DOQS_DIST_BUILD=OFF -DOQS_BUILD_ONLY_LIB=OFF -G Ninja
-cmake --build bench/build/liboqs --target speed_kem
+cmake --build bench/computational/build/liboqs --target speed_kem
 ```
 
 `OQS_USE_OPENSSL=OFF` drops the OpenSSL dependency and fixes the RNG and
@@ -31,7 +33,8 @@ host (`-march=native`); `ON` builds every ISA variant behind runtime
 dispatch, which is what distro packages and liboqs CI use, and measures
 something different.
 
-`bench/build/` is shared with `bench/full/`, so object files are reused.
+`bench/computational/build/` is shared with `../full/`, which configures
+it the same way apart from `OQS_DIST_BUILD`, so object files are reused.
 
 ## What comes out
 
@@ -130,7 +133,7 @@ but only by writing the `perf_event_open` code.
 ## Limits of this approach
 
 This script answers how long one operation takes, and on a quiet machine
-that answer holds up. The ML-KEM figures in `bench/results/` come from
+that answer holds up. The ML-KEM figures in `../results/` come from
 hundreds of thousands of iterations.
 
 Five questions it cannot answer:
@@ -175,5 +178,5 @@ is blocking.
 ## Related
 
 - [`../full/README.md`](../full/README.md) — the harness for cycles and variance
-- [`../../docs/benchmark-environments.md`](../../docs/benchmark-environments.md) — which host can measure what
-- [`../../docs/implementations/liboqs.md`](../../docs/implementations/liboqs.md) — source references for the defects above
+- [`../../../docs/experimental-environments.md`](../../../docs/experimental-environments.md) — which host can measure what
+- [`../../../docs/implementations/liboqs.md`](../../../docs/implementations/liboqs.md) — source references for the defects above

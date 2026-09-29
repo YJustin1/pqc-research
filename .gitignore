@@ -32,3 +32,7 @@ cmake-build*/
 
 # Downloaded paper PDFs (kept local for reading, not redistributed via git)
 papers/pdfs/
+
+# raw benchmark samples . The summaries
+# next to them in bench/computational/results/<stamp>/ are small and are kept.
+bench/computational/results/*/raw.csv

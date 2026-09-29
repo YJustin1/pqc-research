@@ -10,7 +10,7 @@ The cycle columns liboqs prints are recorded as `tsc_ticks_*`, not
 truncated to 32 bits. See ../full/README.md for why that matters and what
 measuring it properly costs.
 
-Usage:  python3 bench/simple/speed_kem_totals.py [seconds_per_op]
+Usage:  python3 bench/computational/simple/speed_kem_totals.py [seconds_per_op]
 """
 
 import csv
@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-BENCH = Path(__file__).resolve().parent.parent
+BENCH = Path(__file__).resolve().parent.parent  # bench/computational
 SPEED_KEM = BENCH / "build" / "liboqs" / "tests" / "speed_kem"
 OUT = BENCH / "results" / "simple-speed_kem.csv"
 DURATION = sys.argv[1] if len(sys.argv) > 1 else "3"
@@ -37,7 +37,7 @@ ROW = re.compile(
 )
 
 if not SPEED_KEM.exists():
-    sys.exit(f"ERROR: {SPEED_KEM} not found -- see bench/simple/README.md")
+    sys.exit(f"ERROR: {SPEED_KEM} not found -- see bench/computational/simple/README.md")
 
 rows = []
 for alg in ALGS:
