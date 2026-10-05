@@ -111,7 +111,7 @@ is trusted.
 The same namespaces, with `tc netem` imposing delay, jitter, loss and a
 bandwidth cap. Root is needed, which we have on the workstation.
 
-Rather than inventing numbers, we'd first **measure a few real paths**
+Rather than inventing numbers, we'd first measure a few real paths
 with `ping` and `mtr`, recording round-trip time, jitter and loss:
 
 - the campus LAN to a UTCS lab host;

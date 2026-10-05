@@ -132,9 +132,10 @@ def code_size(out: Path, ident: str) -> dict[str, int]:
     implementation targets (CMakeFiles/<ident>_<impl>.dir/)."""
     objs = [o for d in out.glob(f"src/kem/*/CMakeFiles/{ident}_*.dir")
             for o in d.rglob("*.o")]
-    totals = {"text": 0, "data": 0, "bss": 0}
     if not objs:
-        return totals
+        # A zero here would read as a measurement; the build layout changed.
+        sys.exit(f"ERROR: no object files for {ident} under {out}/src/kem")
+    totals = {"text": 0, "data": 0, "bss": 0}
     lines = run(["size", *map(str, objs)], capture_output=True,
                 text=True).stdout.splitlines()[1:]
     for line in lines:
@@ -281,18 +282,17 @@ def main() -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
     env = environment(args.liboqs_rev)
     outdir = RESULTS / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{env['host']}"
-    outdir.mkdir(parents=True, exist_ok=True)
 
     sizes, mem, code = [], [], []
     for v in variants:
         out = build(v, args.algs, ids, args.jobs, args.force_build)
         lengths = object_sizes(out)
         for alg in args.algs:
-            if not sizes or alg not in {s["alg"] for s in sizes}:
-                l = lengths[alg]
-                sizes.append({"alg": alg, "pk_bytes": l["public-key"],
-                              "sk_bytes": l["secret-key"], "ct_bytes": l["ciphertext"],
-                              "ss_bytes": l["shared-secret"]})
+            if alg not in {s["alg"] for s in sizes}:
+                n = lengths[alg]
+                sizes.append({"alg": alg, "pk_bytes": n["public-key"],
+                              "sk_bytes": n["secret-key"], "ct_bytes": n["ciphertext"],
+                              "ss_bytes": n["shared-secret"]})
             log(f"[{v}] {alg}")
             with tempfile.TemporaryDirectory() as wd:
                 mem += [{"variant": v, **r} for r in measure(out, alg, Path(wd), args.reps)]
@@ -300,6 +300,8 @@ def main() -> None:
             code.append({"variant": v, "alg": alg, "text_bytes": c["text"],
                          "data_bytes": c["data"], "bss_bytes": c["bss"]})
 
+    # Created only now, so a failed build or run leaves no empty results dir.
+    outdir.mkdir(parents=True, exist_ok=True)
     write_csv(outdir / "sizes.csv", sizes)
     write_csv(outdir / "memory.csv", mem)
     write_csv(outdir / "codesize.csv", code)
