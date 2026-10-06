@@ -48,6 +48,8 @@ RESULTS = HERE / "results"
 OPS = {0: "keygen", 1: "encaps", 2: "decaps"}
 VARIANTS = {"native": "auto", "generic": "generic"}
 
+# The liboqs sets from bench/algorithms.md; keep in step with it and with
+# bench/computational/simple/speed_kem_totals.py.
 ALGS = [
     "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024",
     "Classic-McEliece-348864", "Classic-McEliece-348864f",

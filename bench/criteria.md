@@ -3,20 +3,20 @@
 Target criteria to be measured for each algorithm and, 
 when applicable, per operation: keygen, encaps and decaps. 
 
-Algorithms: the three PQC KEMs (ML-KEM, Classic McEliece, NTRU, from
-liboqs) and the classical baselines (X25519, ECDH P-256, RSA-3072 as a
-KEM, from OpenSSL). The baselines are listed in
-[`docs/algorithms/classical-baselines.md`](../docs/algorithms/classical-baselines.md).
-That note also gives the mapping from Diffie-Hellman onto
-keygen/encaps/decaps. Every status below covers the PQC KEMs only unless
+Algorithms: every computational, memory and network measurement covers
+the same 25 parameter sets, listed with their names, sizes and security
+levels in [`algorithms.md`](algorithms.md). These are 19 PQC KEMs from
+liboqs and 6 classical baselines from OpenSSL. The mapping of
+Diffie-Hellman onto keygen/encaps/decaps is in
+[`docs/algorithms/classical-baselines.md`](../docs/algorithms/classical-baselines.md). Every status below covers the PQC KEMs only unless
 it says otherwise.
 
 ## Computational (`computational/`)
 
 | Metric | Unit | How | Status |
 | --- | --- | --- | --- |
-| Time per operation | µs/op | wall clock around each call: `simple/` (liboqs `speed_kem`), and the planned API harness | preliminary numbers from `simple/` on grape-nuts; classical baselines not measured; API harness not written |
-| Cycles per operation | cycles/op | retired core cycles from `perf_event_open`, in the planned API harness | not implemented; `simple/` reports TSC ticks only |
+| Time per operation | µs/op | wall clock around each call: `simple/` (liboqs `speed_kem`), and `api/` (liboqs and OpenSSL) | preliminary numbers from `simple/` on grape-nuts; `api/` implemented, no clean run yet |
+| Cycles per operation | cycles/op | `api/`: full 64-bit TSC ticks; retired user-space core cycles from `perf_event_open` where permitted | implemented in `api/`; perf is refused on the UTCS hosts; `simple/` reports truncated TSC ticks only |
 | Instructions per operation | instructions/op | retired instructions from `perf_event_open` | not implemented |
 
 `simple/` wraps liboqs' `speed_kem`, so it can time only the PQC
@@ -24,9 +24,9 @@ algorithms. Note: its cycle column is TSC ticks rather than core cycles.
 Its figures for the liboqs algorithms should roughly match the API harness's, 
 since we are using the same implementation and only modifying the harness
 
-The API harness (planned, not yet written) will call the liboqs and
-OpenSSL APIs directly. Every algorithm, PQC and classical, is then timed
-with the same loop and counter, so the differences in the results come
+The API harness (`api/`) calls the liboqs and OpenSSL APIs directly.
+Every algorithm, PQC and classical, is timed with the same loop and
+counters, so the differences in the results come
 from the algorithms and libraries, not from two different benchmark
 tools.
 

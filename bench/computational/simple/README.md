@@ -12,8 +12,15 @@ Writes `bench/computational/results/simple-speed_kem.csv` and prints the
 same table. The committed `simple-speed_kem-grape-nuts.csv` is that output
 from the `grape-nuts` host, renamed with a host suffix.
 
-Algorithms benchmarked, set by `ALGS` in the script: ML-KEM-512/768/1024,
-Classic-McEliece-348864/6688128, NTRU-HPS-2048-509, NTRU-HRSS-701.
+Algorithms benchmarked, set by `ALGS` in the script: the 19 liboqs
+parameter sets in [`../../algorithms.md`](../../algorithms.md). The
+committed grape-nuts results predate that list and cover only 7 of
+them: ML-KEM-512/768/1024, Classic-McEliece-348864/6688128,
+NTRU-HPS-2048-509 and NTRU-HRSS-701.
+
+The larger Classic McEliece sets fit only a handful of key generations
+into the 3-second budget, so their keygen rows carry even fewer samples
+than the two described under "Did I get enough samples?" below.
 
 ## Build
 
@@ -164,12 +171,10 @@ Five questions it cannot answer:
 This script also covers liboqs only. `speed_kem` cannot time the
 classical baselines in
 [`classical-baselines.md`](../../../docs/algorithms/classical-baselines.md),
-which come from OpenSSL. A replacement harness is planned. It will call
-the liboqs and OpenSSL APIs directly, so that the PQC and classical
-algorithms are timed with the same loop and counter. Until it exists,
-this script's output is the only timing data. Its figures for liboqs
-algorithms should roughly match the new harness's and can serve as a
-cross-check.
+which come from OpenSSL. The API harness in [`../api/`](../api/README.md)
+times everything with the same loop and counters. This script's figures
+for the liboqs algorithms should roughly match that harness's, and can
+serve as a cross-check.
 
 ## Related
 

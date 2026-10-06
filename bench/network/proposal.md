@@ -39,11 +39,12 @@ keypair and sends the public key. The server encapsulates and sends back
 the ciphertext. The client decapsulates. Both sides then exchange a hash
 of the shared secret to confirm they agree; those bytes get counted
 separately. Messages carry a 4-byte length prefix and nothing else. This
-works for all three schemes and every parameter set, and it isolates the
+works for all three schemes and every parameter set in
+[`../algorithms.md`](../algorithms.md), and it isolates the
 KEM from everything a real protocol adds. It's a small C program against
 liboqs and OpenSSL, which fits the "our code is benchmarking tooling"
-rule. The OpenSSL side runs the classical baselines (X25519, P-256,
-RSA-3072) through the same exchange, through OpenSSL's KEM interface
+rule. The OpenSSL side runs the classical baselines in
+[`../algorithms.md`](../algorithms.md) through the same exchange, through OpenSSL's KEM interface
 (see
 [`classical-baselines.md`](../../docs/algorithms/classical-baselines.md)),
 so every scheme is compared against what it would replace. It
@@ -56,13 +57,14 @@ wire. That's how Classic McEliece is meant to be used, and without it the
 comparison is unfair to McEliece.
 
 **TLS 1.3, for realism.** OpenSSL 3.5 and later supports ML-KEM
-natively, including the X25519MLKEM768 hybrid that browsers use. The
+natively. The
 Open Quantum Safe project's `oqs-provider` plugs other liboqs KEMs into
 OpenSSL, but its `ALGORITHMS.md` lists only FrodoKEM, ML-KEM, BIKE and
 HQC as KEMs, with no NTRU or Classic McEliece (checked 2026-10-05). The
-TLS leg can therefore compare only classical, ML-KEM and hybrid key
-exchanges. The most direct "cost of switching" measurement it gives is
-X25519 against X25519MLKEM768. `openssl s_server` and `openssl s_client`
+TLS leg can therefore compare only the classical baselines and
+ML-KEM. Hybrid key exchanges such as X25519MLKEM768 are out of scope,
+because they are not pure versions of any scheme in
+[`../algorithms.md`](../algorithms.md). `openssl s_server` and `openssl s_client`
 are enough to drive it. **Classic McEliece can't take part.** TLS 1.3 limits a key share to
 65,535 bytes (RFC 8446), and McEliece's smallest public key is 261,120.
 That's a finding for the report in its own right.
@@ -222,8 +224,8 @@ real-path check. Layer 4 is a stretch goal.
 5. Layer 2 runs, with and without `iperf3` competing traffic.
 6. One layer 3 check: the phone on mobile data to a cloud VM, or WSL2 to
    a lab host if it's reachable.
-7. TLS 1.3 runs with OpenSSL: X25519 and P-256 as baselines, ML-KEM,
-   and the hybrids.
+7. TLS 1.3 runs with OpenSSL: X25519 and P-256 as baselines, and
+   ML-KEM.
 8. Layer 4, if time allows.
 
 This follows established practice. As far as we know, Paquin, Stebila
@@ -237,9 +239,6 @@ paper before we cite it.
 - Is TLS 1.3 the protocol we want to report against, or is the bare
   exchange enough for the report? The answer decides how much of step 7
   we need.
-- Are hybrids like X25519MLKEM768 in scope? They're what's actually
-  deployed, but they aren't pure versions of the three schemes we're
-  comparing.
 - Is a small cloud VM acceptable, cost-wise? It's the easiest server for
   the phone and for a long real path.
 - Which UTCS host and port can the workstation reach, and from where?

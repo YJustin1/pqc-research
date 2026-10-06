@@ -9,9 +9,12 @@ communication costs of selected PQC algorithms using existing
 implementations, eventually producing a research report evaluating the 
 tradeoffs and viability in industry. To show the cost of migrating, the
 same measurements are taken on the classical (pre-quantum)
-key-establishment algorithms they would replace: X25519, ECDH P-256 and
-RSA-3072 (see
+key-establishment algorithms they would replace: X25519, ECDH P-256,
+RSA and finite-field DH at 3072 bits, and RSA and finite-field DH at the
+weaker but widely deployed 2048 bits (see
 [docs/algorithms/classical-baselines.md](docs/algorithms/classical-baselines.md)).
+The exact parameter sets measured are listed in
+[bench/algorithms.md](bench/algorithms.md).
 
 ## Scope
 

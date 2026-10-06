@@ -23,10 +23,17 @@ SPEED_KEM = BENCH / "build" / "liboqs" / "tests" / "speed_kem"
 OUT = BENCH / "results" / "simple-speed_kem.csv"
 DURATION = sys.argv[1] if len(sys.argv) > 1 else "3"
 
+# The liboqs sets from bench/algorithms.md; keep in step with it and with
+# bench/memory/run_massif.py.
 ALGS = [
     "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024",
-    "Classic-McEliece-348864", "Classic-McEliece-6688128",
-    "NTRU-HPS-2048-509", "NTRU-HRSS-701",
+    "Classic-McEliece-348864", "Classic-McEliece-348864f",
+    "Classic-McEliece-460896", "Classic-McEliece-460896f",
+    "Classic-McEliece-6688128", "Classic-McEliece-6688128f",
+    "Classic-McEliece-6960119", "Classic-McEliece-6960119f",
+    "Classic-McEliece-8192128", "Classic-McEliece-8192128f",
+    "NTRU-HPS-2048-509", "NTRU-HPS-2048-677", "NTRU-HPS-4096-821",
+    "NTRU-HPS-4096-1229", "NTRU-HRSS-701", "NTRU-HRSS-1373",
 ]
 
 # op | iterations | total time (s) | mean us | pop stdev | cycles | pop stdev
