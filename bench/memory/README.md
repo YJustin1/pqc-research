@@ -1,76 +1,175 @@
 # Memory benchmarks
 
-`run_massif.py` measures the memory footprint of ML-KEM, Classic McEliece
-and NTRU in liboqs. It builds liboqs, runs liboqs' own test program under
-valgrind's massif and collects the numbers. None of the code being
-measured is ours.
+`run_memory.py` measures the stack and heap of single KEM calls, the
+object sizes, and liboqs' code size, for every parameter set in
+[`../algorithms.md`](../algorithms.md). The PQC KEMs go through the
+liboqs API, and the classical baselines (plus ML-KEM a second time) go
+through the OpenSSL API. Both are called from the driver shared with the
+timing harness, [`../driver/kem_bench.c`](../driver/kem_bench.c). The
+code being measured is upstream's; the figures still contain a small,
+measured contribution from the harness, described under Stack.
 
 ```sh
-python3 bench/memory/run_massif.py                     # all 19 parameter sets, both builds
-python3 bench/memory/run_massif.py --algs ML-KEM-768   # one parameter set
+python3 bench/memory/run_memory.py                          # everything
+python3 bench/memory/run_memory.py --algs X25519 ML-KEM-768
+python3 bench/memory/run_memory.py --massif                 # + valgrind cross-check
 ```
 
-Requirements: `valgrind`, `cmake` and a C compiler. Implementation measures
-bytes and rather than time, so machine load doesn't matter and a shared host
-is fine. Results go to `bench/memory/results/<UTC stamp>-<host>/`:
+Requirements: `cmake`, `ninja`, `make`, `perl`, a C compiler and Python
+3.12+; `valgrind` only for `--massif`. Results are byte counts, not
+times, so machine load does not matter and a shared host is fine.
+Results go to `bench/memory/results/<UTC stamp>-<host>/`:
 
 | File | Contents |
 | --- | --- |
 | `summary.md` | all tables |
-| `sizes.csv` | key, ciphertext and shared-secret sizes |
-| `memory.csv` | peak stack and heap per (build, parameter set, operation) |
-| `codesize.csv` | text / data / bss per (build, parameter set) |
-| `env.json` | host, CPU, compiler, valgrind version, liboqs revision, build options |
+| `sizes.csv` | public key, ciphertext and shared-secret sizes, per (impl, set) |
+| `memory.csv` | stack and heap, first call and steady state, and the subtracted stack overhead, per (build, impl, set, operation) |
+| `codesize.csv` | liboqs text / data / bss per (build, set) |
+| `massif.csv` | `--massif` only: the valgrind cross-check |
+| `env.json` | host, CPU, compiler, library versions, liboqs revision, build options |
 
-Every figure is reported for two builds, both configured with
-`OQS_DIST_BUILD=OFF` and `OQS_USE_OPENSSL=OFF` so that each liboqs entry
-point calls exactly one implementation:
+## Builds
+
+liboqs is measured twice, both with `OQS_DIST_BUILD=OFF` and
+`OQS_USE_OPENSSL=OFF`, so each entry point calls exactly one
+implementation:
 
 | Build | `OQS_OPT_TARGET` | Code that runs |
 | --- | --- | --- |
 | `native` | `auto` (`-march=native`) | optimised AVX2 implementations on x86_64 |
 | `generic` | `generic` (`-march=x86-64`) | portable C implementations |
 
-## Stack and heap
+OpenSSL has one build (labelled `default`), the pinned 3.5.9 release
+described in [`../computational/api/README.md`](../computational/api/README.md).
+It contains both portable and assembly code paths and picks one at run
+time from the CPU's features.
 
-liboqs ships `tests/test_kem_mem.c`, which does one KEM operation per
-process. `test_kem_mem <alg> 0` generates a keypair, `1` encapsulates, and
-`2` decapsulates and checks that the shared secrets match. Keys and
-ciphertexts pass between steps through files in `./tmp`, so each process
-holds exactly one operation. We run each step under
-`valgrind --tool=massif --stacks=yes --peak-inaccuracy=0.0` and report the
-largest `mem_stacks_B` and `mem_heap_B` across massif's snapshots. Setting
-the peak inaccuracy to zero gets the exact peak instead of one within 1%.
-Heap counts requested bytes, not allocator overhead. If decapsulation
-doesn't print `shared secrets are equal`, the run aborts.
+## Method
 
-Massif sees the whole process, so the numbers cover `test_kem_mem` as well
-as liboqs. The heap figure includes the key and ciphertext buffers the
-test program allocates, the `OQS_KEM` descriptor, and libc's stdio and
-`FILE` buffers. For Classic McEliece the public-key buffer alone is 261 KB
-to 1.36 MB and dominates everything else. The stack figure includes
-`main()`, C runtime start-up and the test program's own `printf` and file
-I/O, which can be the deepest point when the operation itself needs
-little stack, as McEliece encapsulation does. Read the heap as roughly
-what an application holding one keypair and one ciphertext would need,
-and the stack as an upper bound on what the operation uses.
+For each (build, set), `kem_bench prepare` generates a keypair and a
+ciphertext, checks the round trip, and writes them to a temporary
+directory. Then, for each operation, `kem_bench memory` runs in fresh
+processes, in two builds of the driver: the plain build (also used for
+timing) gives the stack figures, and the memory build, which tracks
+allocations, gives the heap figures. The memory build's allocator
+wrappers would otherwise add their own frames to the stack of any call
+that allocates. It loads only the inputs that operation needs (a sender holds
+the public key; a recipient holds the keypair and a ciphertext) and
+measures three calls:
 
-Small figures are noisy. libc's 4 KB stdio buffers are sometimes live at
-the heap peak and sometimes not, and we've seen the same binary shift by a
-few KB between invocations. Where liboqs sets the peak, as in McEliece key
-generation, the numbers don't move. Each operation runs `--reps` times
-(default 3), and `memory.csv` reports the maximum with the minimum in the
-`*_min` columns. Treat anything under about 16 KB as ±4 KB. That covers
-every ML-KEM and NTRU heap figure and McEliece encapsulation's stack.
+- **first**: the first call in the process. This includes any one-time
+  setup the library does on first use.
+- **steady**: the larger of the next two calls.
+
+Decapsulation's secret is checked against the saved one. Each
+(build, set, operation) runs in `--reps` separate processes (default 3);
+`memory.csv` reports the maximum and keeps the minimum in `*_min`
+columns.
+
+**Heap.** The memory build links with `-Wl,--wrap=` for `malloc`,
+`calloc`, `realloc`, `free`, `aligned_alloc`, `posix_memalign` and
+`memalign`. liboqs and libcrypto are linked statically, so every
+allocation they make reaches the wrappers, which track each live block's
+requested size. The figure is the peak of live bytes during the call,
+above the level when it started. Counted:
+
+- requested sizes, not allocator overhead;
+- anything the call returns that is still allocated when it ends. That
+  matters for OpenSSL keygen, which returns a newly allocated key object.
+  liboqs writes its outputs into buffers the caller provides, which are
+  not counted.
+
+Allocations glibc makes internally (its stdio buffers, for example) do
+not pass through the wrappers and are not counted.
+
+**Stack.** The call runs on a separate 64 MiB stack, filled with a byte
+pattern and with an inaccessible guard page below it, so an overflow
+crashes instead of giving a wrong answer. Afterwards, the deepest byte
+that no longer holds the pattern marks how far the call reached. The two
+steady calls use different patterns (`0xA5`, `0x5A`), so a call that
+happens to write the pattern byte at its deepest point cannot hide it.
+Stack that a function reserves but never writes is not counted.
+
+The scan also sees the harness's own frames: the context-switch
+trampoline and the call through the backend's function pointer. Each
+process measures them by running an operation that does nothing, the
+same way, and subtracts the result. It is reported as
+`stack_overhead_bytes` and was 40 bytes for every measurement on the
+workstation. Measured with the allocator-tracking build instead, the same
+calls came out at most 8 bytes deeper in the cases checked.
+
+## First call versus steady state
+
+*Observed:* for liboqs the two are identical; it does no setup on first
+use. For OpenSSL the first call is much larger: tens to about 200 KB of
+heap, against hundreds of bytes to tens of KB in steady state.
+
+*Interpretation:* OpenSSL creates some state on first use and keeps it
+for the life of the process. Initialising its random-number generator
+before the call removed most of the difference in an experiment. The rest
+is consistent with the first lookup of the helper algorithms an
+operation uses (HKDF and SHA-256 for DHKEM, SHA-3 for ML-KEM), but those
+allocations have not been traced.
+
+The two figures answer different questions:
+- **steady** is the per-operation cost in a long-running process, such as
+  a server doing many handshakes. It is the figure to compare across
+  libraries.
+- **first** is what a short-lived process doing one handshake pays.
+
+Loading a key can itself trigger the setup. OpenSSL ML-KEM decapsulation,
+whose keypair import already does it, shows no difference between first
+and steady.
 
 ## Sizes and code size
 
-Key, ciphertext and shared-secret lengths come from liboqs'
-`tests/dump_alg_info`. They're fixed by each scheme's specification.
+Object sizes are what the driver reports for each (impl, set):
+`OQS_KEM`'s lengths for liboqs, and the actual output lengths for
+OpenSSL. RSA has no "encoded public key", so its public-key size is the
+modulus size.
 
-Code size is `size` summed over the object files of the parameter set's
-own implementation targets, `src/kem/<family>/CMakeFiles/<id>_*.dir/`.
-`text` includes `.rodata`. Code shared between algorithms, meaning SHA-3,
-the RNG and `src/common/`, isn't counted. Every function in the
+liboqs code size is `size` summed over the object files of the parameter
+set's own implementation targets, `src/kem/<family>/CMakeFiles/<id>_*.dir/`
+in each build. `text` includes `.rodata`. Code shared between algorithms
+(SHA-3, the RNG and `src/common/`) is not counted. Every function in the
 parameter set's own objects is, whether or not the three KEM operations
 ever reach it.
+
+OpenSSL code size is **not measured**. Programs select its algorithms by
+name at run time, from a table of everything the library contains, so
+the linker keeps them all and no per-algorithm code can be separated.
+
+## Cross-check with valgrind massif
+
+`--massif` also runs every liboqs native set under
+`valgrind --tool=massif --stacks=yes --peak-inaccuracy=0.0`, twice per
+operation:
+- `kem_bench once`: load the inputs, run the operation once, and exit;
+- `kem_bench baseline`: the same, minus the operation.
+
+The massif heap figure is the difference of the two whole-process peaks,
+and the stack figure is `once`'s whole-process peak.
+
+*Observed (workstation, 2026-10-06, all 19 liboqs native sets):*
+- **Heap.** It agreed with the in-process figure for every operation
+  except Classic McEliece keygen (9 of the 10 sets in one run, all 10 in
+  the next). There, massif reported 0 where in-process found 224 bytes:
+  a larger transient during start-up set both processes' peaks.
+- **Stack.** For 47 of the 57 operations, massif was 576–736 bytes
+  higher. That is `main()`, start-up frames and the 40-byte harness
+  overhead, which the in-process figure subtracts. For Classic McEliece
+  encaps it was 2.4–5.0 KB higher. That operation's own stack is smaller
+  than the loading code's, so massif reports the loading code's depth.
+
+massif cannot measure OpenSSL this way. A process has a single peak, so
+OpenSSL's first-use setup always dominates, and no warm-up call can
+separate it out.
+
+## Earlier results
+
+`results/20260929T081700Z-grape-nuts/` was produced by the previous
+method: valgrind massif on liboqs' own `tests/test_kem_mem`, whole
+process, liboqs only. Its stack and heap include the test program's own
+buffers, stdio and start-up. They are not directly comparable with
+in-process figures.

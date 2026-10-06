@@ -34,25 +34,23 @@ tools.
 
 | Metric | Unit | How | Status |
 | --- | --- | --- | --- |
-| Peak stack | bytes/op | valgrind massif on liboqs' `test_kem_mem` | measured on grape-nuts, 2026-09-29 |
-| Peak heap | bytes/op | same run | measured on grape-nuts, 2026-09-29 |
-| Code size | bytes of text, data and bss | `size` over each parameter set's object files | measured on grape-nuts, 2026-09-29 |
+| Peak stack | bytes/op | in-process: separate pattern-filled stack, scanned after the call (`run_memory.py`) | implemented for liboqs and OpenSSL; no full run yet. Previous method (massif on `test_kem_mem`, liboqs only): grape-nuts, 2026-09-29 |
+| Peak heap | bytes/op | in-process: wrapped allocator, peak live bytes during the call; first call and steady state | same |
+| Code size | bytes of text, data and bss | `size` over each liboqs parameter set's object files | liboqs only; not measured for OpenSSL, whose algorithms cannot be separated |
 
-All three come in a native (AVX2) and a generic (portable C) build.
-Stack and heap are measured using the whole program, so anything under about 16 KB
-carries about ±4 KB of noise. 
-
-The classical baselines are not measured. `test_kem_mem` is a liboqs
-program and cannot run OpenSSL algorithms. The current measuring method
-depends on liboqs' libraries and will need to be rewritten for the new harness. 
+liboqs comes in a native (AVX2) and a generic (portable C) build;
+OpenSSL has its one default build. For OpenSSL, the first call in a
+process includes one-time setup (tens to ~200 KB of heap). Steady state
+is the figure to compare across libraries. See
+[`memory/README.md`](memory/README.md).
 
 ## Network (`network/`)
 
 | Metric | Unit | How | Status |
 | --- | --- | --- | --- |
-| Public-key size | bytes | liboqs' `dump_alg_info`; OpenSSL's API for the classical baselines | PQC recorded in `memory/results/*/sizes.csv`; classical taken from the specifications only |
-| Ciphertext size | bytes | same | recorded in `memory/results/*/sizes.csv` |
-| Secret-key and shared-secret size | bytes | same | recorded in `memory/results/*/sizes.csv` |
+| Public-key size | bytes | reported by the shared driver: `OQS_KEM` lengths for liboqs, actual output lengths for OpenSSL | PQC in `memory/results/20260929T081700Z-grape-nuts/sizes.csv`; all sets once `run_memory.py` runs |
+| Ciphertext size | bytes | same | same |
+| Secret-key and shared-secret size | bytes | same; secret key for liboqs only | same |
 | Handshake bytes | bytes per key exchange | public key plus ciphertext on the wire, including protocol framing | not measured |
 | Packets per handshake | packets at a given MTU | from handshake bytes | not measured |
 

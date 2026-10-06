@@ -4,8 +4,9 @@ Times keygen, encaps and decaps for every parameter set in
 [`../../algorithms.md`](../../algorithms.md). The PQC KEMs go through
 the liboqs API, and the classical baselines go through the OpenSSL API.
 ML-KEM is also timed through OpenSSL, as the same-library comparison.
-Both libraries are called from one C driver, `kem_bench.c`, with the
-same loop and the same counters. Differences in the results therefore
+Both libraries are called from one C driver,
+[`../../driver/kem_bench.c`](../../driver/kem_bench.c) (shared with the
+memory harness), with the same loop and the same counters. Differences in the results therefore
 come from the algorithms and libraries, not from two different benchmark
 tools.
 
@@ -23,14 +24,16 @@ roughly 20–30 minutes.
 
 ## Build
 
-`run_bench.py` builds three things under `../build/` (gitignored), and
-rebuilds only what is missing or out of date:
+`run_bench.py` builds through
+[`../../driver/kem_build.py`](../../driver/kem_build.py), which puts
+everything under `bench/driver/build/` (gitignored) and rebuilds only
+what is missing or out of date. Timing uses:
 
 | What | Where | How |
 | --- | --- | --- |
-| liboqs | `build/liboqs-lib/` | the submodule, `Release`, `OQS_DIST_BUILD=OFF` (`-march=native`), `OQS_USE_OPENSSL=OFF`, library only |
-| OpenSSL | `build/openssl-3.5.9/` | the 3.5.9 release tarball, checked against a pinned SHA-256, `no-shared no-tests` |
-| driver | `build/kem_bench` | `cc -O2 -march=native`, linked statically against both |
+| liboqs | `liboqs-native/` | the submodule, `Release`, `OQS_DIST_BUILD=OFF`, `OQS_OPT_TARGET=auto` (`-march=native`), `OQS_USE_OPENSSL=OFF`, library only |
+| OpenSSL | `openssl-3.5.9/` | the 3.5.9 release tarball, checked against a pinned SHA-256, `no-shared no-tests` |
+| driver | `kem_bench-native` | `cc -O2 -march=native`, linked statically against both; no allocator tracking |
 
 OpenSSL is built from a pinned source release rather than taken from
 the system. The departmental hosts run Ubuntu 24.04, whose system
@@ -135,5 +138,3 @@ property of the algorithm.
 - Correcting perf's user-space cycles for time spent in the kernel. An
   earlier, deleted harness calibrated this; see
   [`experimental-environments.md`](../../../docs/experimental-environments.md).
-- A one-operation-per-process mode for memory measurement under massif.
-  `bench/memory/` still uses liboqs' `test_kem_mem`.

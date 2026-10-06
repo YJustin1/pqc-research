@@ -7,10 +7,9 @@ baselines from OpenSSL.  To add or remove a set, change it
 here first, then in each script's `ALGS` list:
 
 - `computational/simple/speed_kem_totals.py`
-- `memory/run_massif.py`
-
-- `computational/api/run_bench.py`, which refuses to run if its list
-  and this file disagree
+- `memory/run_memory.py` and `computational/api/run_bench.py`, through
+  `driver/kem_build.py`, which refuses to build if its list and this
+  file disagree
 
 The network tools should reference this list too.
 
@@ -39,7 +38,7 @@ A large quantum computer running Shor's algorithm breaks
 The number in the name is the dimension of the module lattice: `256 × k`
 or `k` polynomials of 256 coefficients each. 
 
-| Set | `k` | Level | Public key | Secret key | Ciphertext |
+| Set | `k` | Level | Public key (bytes) | Secret key (bytes) | Ciphertext (bytes) |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | ML-KEM-512 | 2 | 1 | 800 | 1,632 | 768 |
 | ML-KEM-768 | 3 | 3 | 1,184 | 2,400 | 1,088 |
@@ -86,7 +85,7 @@ encaps and decaps are the same code.
 Our interpretation: fewer restarts should make `f` keygen faster on
 average and less heavy-tailed. 
 
-| Set | `n` | `t` | `m` | Level | Public key | Secret key | Ciphertext |
+| Set | `n` | `t` | `m` | Level | Public key (bytes) | Secret key (bytes) | Ciphertext (bytes) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Classic-McEliece-348864 | 3488 | 64 | 12 | 1 | 261,120 | 6,492 | 96 |
 | Classic-McEliece-348864f | 3488 | 64 | 12 | 1 | 261,120 | 6,492 | 96 |
@@ -112,7 +111,7 @@ Two variants, which name their parameters differently:
 difference between the variants is described in
 [`ntru.md`](../docs/algorithms/ntru.md).
 
-| Set | `n` | `q` | Level | Public key | Secret key | Ciphertext |
+| Set | `n` | `q` | Level | Public key (bytes) | Secret key (bytes) | Ciphertext (bytes) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | NTRU-HPS-2048-509 | 509 | 2,048 | 1 | 699 | 935 | 699 |
 | NTRU-HPS-2048-677 | 677 | 2,048 | 3 | 930 | 1,234 | 930 |
@@ -138,7 +137,7 @@ There is no classical baseline at levels 3 or 5. P-384 could level 3.
 RSA and finite-field DH at those levels need
 7680-bit and 15360-bit moduli, which are almost never deployed. 
 
-| Set | What the name means | Matches level | Public key | "Ciphertext" | Shared secret |
+| Set | What the name means | Matches level | Public key (bytes) | "Ciphertext" (bytes) | Shared secret (bytes) |
 | --- | --- | ---: | ---: | ---: | ---: |
 | X25519 | Diffie-Hellman on Curve25519, over the prime field `2^255 − 19` | 1 | 32 | 32 | 32 |
 | P-256 | ECDH on the NIST curve over a 256-bit prime field | 1 | 65 | 65 | 32 |
