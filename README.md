@@ -7,12 +7,17 @@ This project studies post-quantum cryptographic (PQC) algorithms and their
 practical implementations. The goal is to compare the computational and
 communication costs of selected PQC algorithms using existing
 implementations, eventually producing a research report evaluating the 
-tradeoffs and viability in industry.
+tradeoffs and viability in industry. To show the cost of migrating, the
+same measurements are taken on the classical (pre-quantum)
+key-establishment algorithms they would replace: X25519, ECDH P-256 and
+RSA-3072 (see
+[docs/algorithms/classical-baselines.md](docs/algorithms/classical-baselines.md)).
 
 ## Scope
 
-All measurements are taken against existing upstream implementations
-(tracked under `implementations/`). Our own code is limited to the
+All measurements are taken against existing upstream implementations:
+the PQC algorithms from the submodules under `implementations/`, and the
+classical baselines from OpenSSL. Our own code is limited to the
 benchmarking and analysis tooling needed to measure them (see `bench/`).
 
 ## Project Phases
@@ -34,7 +39,8 @@ Implementation research includes:
 
 ### Phase 2 — Performance Evaluation
 
-Measure existing implementations of the selected algorithms and compare:
+Measure existing implementations of the selected algorithms and of the
+classical baselines, and compare:
 
 - execution time
 - processor overhead
@@ -67,5 +73,7 @@ their internal structure, and how their tests validate correctness.
 - [mlkem-native](implementations/mlkem-native)
 - [PQClean](implementations/pqclean)
 - [liboqs](implementations/liboqs) not a PQC implementation itself; a benchmarking/comparison harness over multiple implementations
+- OpenSSL 3.5+ (not a submodule) for the classical baselines, and a
+  second ML-KEM for a same-library comparison
 
 ## Documentation

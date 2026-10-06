@@ -7,8 +7,7 @@ whole requirement.
 
 The cycle columns liboqs prints are recorded as `tsc_ticks_*`, not
 "cycles", because on x86_64 that is what they are -- and they are
-truncated to 32 bits. See ../full/README.md for why that matters and what
-measuring it properly costs.
+truncated to 32 bits. See README.md for why that matters.
 
 Usage:  python3 bench/computational/simple/speed_kem_totals.py [seconds_per_op]
 """

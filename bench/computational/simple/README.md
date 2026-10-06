@@ -33,9 +33,6 @@ host (`-march=native`); `ON` builds every ISA variant behind runtime
 dispatch, which is what distro packages and liboqs CI use, and measures
 something different.
 
-`bench/computational/build/` is shared with `../full/`, which configures
-it the same way apart from `OQS_DIST_BUILD`, so object files are reused.
-
 ## What comes out
 
 `speed_kem` prints one row per operation with 7 fields:
@@ -164,19 +161,17 @@ Five questions it cannot answer:
   deviations mix the algorithm's real spread with sampling error, and
   the output does not distinguish them.
 
-[`../full/`](../full/README.md) addresses these. It calls the liboqs API
-directly, reads the full 64-bit counter, adds a `perf_event_open` cycle
-counter where the kernel permits one, runs each algorithm as R
-independent processes to separate within-run from between-run variance,
-reports medians and percentiles alongside trimmed means, and computes
-required sample sizes from the measured spread.
-
-It is also much larger, and most of it is measurement machinery rather
-than benchmarking. Use this script until one of the five questions above
-is blocking.
+This script also covers liboqs only. `speed_kem` cannot time the
+classical baselines in
+[`classical-baselines.md`](../../../docs/algorithms/classical-baselines.md),
+which come from OpenSSL. A replacement harness is planned. It will call
+the liboqs and OpenSSL APIs directly, so that the PQC and classical
+algorithms are timed with the same loop and counter. Until it exists,
+this script's output is the only timing data. Its figures for liboqs
+algorithms should roughly match the new harness's and can serve as a
+cross-check.
 
 ## Related
 
-- [`../full/README.md`](../full/README.md) — the harness for cycles and variance
 - [`../../../docs/experimental-environments.md`](../../../docs/experimental-environments.md) — which host can measure what
 - [`../../../docs/implementations/liboqs.md`](../../../docs/implementations/liboqs.md) — source references for the defects above
