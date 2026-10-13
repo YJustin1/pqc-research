@@ -51,10 +51,13 @@ is the figure to compare across libraries. See
 | Public-key size | bytes | reported by the shared driver: `OQS_KEM` lengths for liboqs, actual output lengths for OpenSSL | PQC in `memory/results/20260929T081700Z-grape-nuts/sizes.csv`; all sets once `run_memory.py` runs |
 | Ciphertext size | bytes | same | same |
 | Secret-key and shared-secret size | bytes | same; secret key for liboqs only | same |
-| Handshake bytes | bytes per key exchange | public key plus ciphertext on the wire, including protocol framing | not measured |
-| Packets per handshake | packets at a given MTU | from handshake bytes | not measured |
+| Handshake bytes | bytes per key exchange | bare KEM exchange over TCP (`run_network.py`), per direction: application bytes and wire bytes from interface counters | all 25 sets (28 impl/set pairs), ephemeral and cached-key, clean link: workstation, 2026-10-13 |
+| Packets per handshake | packets per direction at MTU 1500 | interface counters on a veth link with offloads off | same |
+| Time to shared secret | ms | client `connect()` until it has checked the server's key confirmation; KEM compute and network time separated | implemented; clean-link numbers only, `--netem` profiles not yet chosen |
+| Retransmissions, failures | count | `TCP_INFO` total retransmits; handshakes that did not complete | implemented; zero on the clean link |
 
 The sizes were checked once against each specification's formulas and,
-for ML-KEM-512, with valgrind memcheck. Handshake bytes add framing 
-on top of the raw sizes, so they depend on the protocol we pick. 
-Nothing in `network/` exists yet.
+for ML-KEM-512, with valgrind memcheck. Handshake bytes add framing on
+top of the raw sizes, so they depend on the protocol. The numbers above
+are for the bare exchange in [`network/README.md`](network/README.md);
+TLS 1.3 is not measured yet.

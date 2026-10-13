@@ -1,13 +1,15 @@
 /*
  * kem_bench: run KEM operations through either liboqs or OpenSSL, for
- * the timing harness (bench/computational/api/) and the memory harness
- * (bench/memory/).
+ * the timing harness (bench/computational/api/), the memory harness
+ * (bench/memory/) and the network harness (bench/network/).
  *
  *   kem_bench time     <impl> <alg> <op> <max_iters> <max_seconds> <warmup_seconds>
  *   kem_bench prepare  <impl> <alg> <dir>
  *   kem_bench memory   <impl> <alg> <op> <dir>
  *   kem_bench once     <impl> <alg> <op> <dir>
  *   kem_bench baseline <impl> <alg> <op> <dir>
+ *   kem_bench server   <impl> <alg> <port> <keydir|->
+ *   kem_bench client   <impl> <alg> <host> <port> <count> <keydir|-> <iface|->
  *   kem_bench version
  *
  *   impl  liboqs | openssl
@@ -49,13 +51,30 @@
  * memory, once and decaps all check the decapsulated secret against the
  * saved one.
  *
+ * server / client: one key exchange per TCP connection, described above
+ *   cmd_server. With keydir "-" the exchange is ephemeral: the client
+ *   generates a keypair and sends the public key, and the server
+ *   encapsulates to it. With a keydir written by prepare, it is
+ *   cached-key: the client already holds the server's public key and
+ *   sends only a ciphertext. The server runs until killed; the client
+ *   runs `count` handshakes one after another. With an interface name,
+ *   the client also records that interface's packet and byte counters
+ *   for each handshake.
+ *
  * Output on stdout, one record per line:
  *   M,<key>,<value>                          metadata
  *   S,<tsc_ticks>,<ns>,<perf_user_cycles>    time only: one per iteration;
  *                                            cycles are -1 without perf
+ *   H,<fields in HANDSHAKE_FIELDS>           server / client: one per handshake
+ *   F,<index>,<reason>                       server / client: a failed handshake
  */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <linux/tcp.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <linux/perf_event.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -65,17 +84,20 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 #include <x86intrin.h>
 
 #include <oqs/oqs.h>
+#include <openssl/bn.h>
 #include <openssl/core_names.h>
 #include <openssl/crypto.h>
 #include <openssl/dh.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/param_build.h>
 #include <openssl/rsa.h>
 
 #define MIN_ITERS 3
@@ -363,6 +385,10 @@ typedef struct {
 	/* scratch outputs of the operations */
 	unsigned char out_ct[BUF_MAX], out_ss[BUF_MAX];
 	size_t out_ss_len;
+
+	/* network: this side's public key, as sent */
+	unsigned char pk[BUF_MAX];
+	size_t pk_len;
 
 	/* allocated during an operation, freed by cleanup */
 	EVP_PKEY *tmp_key;
@@ -653,6 +679,8 @@ static void usage(void) {
 	        "       kem_bench memory   <liboqs|openssl> <alg> <keygen|encaps|decaps> <dir>\n"
 	        "       kem_bench once     <liboqs|openssl> <alg> <keygen|encaps|decaps> <dir>\n"
 	        "       kem_bench baseline <liboqs|openssl> <alg> <keygen|encaps|decaps> <dir>\n"
+	        "       kem_bench server   <liboqs|openssl> <alg> <port> <keydir|->\n"
+	        "       kem_bench client   <liboqs|openssl> <alg> <host> <port> <count> <keydir|-> <iface|->\n"
 	        "       kem_bench version\n");
 	exit(2);
 }
@@ -1011,6 +1039,638 @@ static int cmd_memory(int argc, char **argv) {
 	return 0;
 }
 
+/* ================================================================
+ * Network backends
+ *
+ * Each process plays one role for all of its handshakes, so one state
+ * holds either this side's keypair or the peer's public key.
+ *
+ * keygen()        generate a keypair, keep it for decaps, and return the
+ *                 public key as it goes on the wire.
+ * set_peer()      take a peer's public key off the wire as the encaps
+ *                 target. The buffer must stay valid until encaps.
+ * load_keypair()  cached-key server: the keypair from a prepare dir.
+ * load_peer()     cached-key client: the public key from a prepare dir.
+ * reset()         drop the keys of one ephemeral handshake.
+ * ================================================================ */
+
+typedef struct {
+	void *(*create)(const char *alg);
+	int (*keygen)(void *state, const uint8_t **pk, size_t *pk_len);
+	int (*set_peer)(void *state, const uint8_t *pk, size_t pk_len);
+	int (*encaps)(void *state, const uint8_t **ct, size_t *ct_len, const uint8_t **ss, size_t *ss_len);
+	int (*decaps)(void *state, const uint8_t *ct, size_t ct_len, const uint8_t **ss, size_t *ss_len);
+	void (*load_keypair)(void *state, const char *dir);
+	void (*load_peer)(void *state, const char *dir);
+	void (*reset)(void *state);
+} net_backend;
+
+/* --- liboqs: keys go on the wire as the raw bytes liboqs uses --- */
+
+static void *oqs_net_create(const char *alg) {
+	oqs_state *s = oqs_new(alg);
+	s->out_pk = malloc(s->kem->length_public_key);
+	s->sk = malloc(s->kem->length_secret_key);
+	s->out_ct = malloc(s->kem->length_ciphertext);
+	s->out_ss = malloc(s->kem->length_shared_secret);
+	return s;
+}
+
+static int oqs_net_keygen(void *state, const uint8_t **pk, size_t *pk_len) {
+	oqs_state *s = state;
+	*pk = s->out_pk;
+	*pk_len = s->kem->length_public_key;
+	return OQS_KEM_keypair(s->kem, s->out_pk, s->sk) == OQS_SUCCESS;
+}
+
+/* Borrow the received buffer instead of copying up to 1.3 MB. */
+static int oqs_net_set_peer(void *state, const uint8_t *pk, size_t pk_len) {
+	oqs_state *s = state;
+	if (pk_len != s->kem->length_public_key) return 0;
+	s->pk = (uint8_t *)pk;
+	return 1;
+}
+
+static int oqs_net_encaps(void *state, const uint8_t **ct, size_t *ct_len, const uint8_t **ss, size_t *ss_len) {
+	oqs_state *s = state;
+	*ct = s->out_ct;
+	*ct_len = s->kem->length_ciphertext;
+	*ss = s->out_ss;
+	*ss_len = s->kem->length_shared_secret;
+	return OQS_KEM_encaps(s->kem, s->out_ct, s->out_ss, s->pk) == OQS_SUCCESS;
+}
+
+static int oqs_net_decaps(void *state, const uint8_t *ct, size_t ct_len, const uint8_t **ss, size_t *ss_len) {
+	oqs_state *s = state;
+	if (ct_len != s->kem->length_ciphertext) return 0;
+	*ss = s->out_ss;
+	*ss_len = s->kem->length_shared_secret;
+	return OQS_KEM_decaps(s->kem, s->out_ss, ct, s->sk) == OQS_SUCCESS;
+}
+
+static void oqs_net_load_keypair(void *state, const char *dir) {
+	oqs_state *s = state;
+	if (read_file(dir, "sk", s->sk, s->kem->length_secret_key) != s->kem->length_secret_key)
+		die("sk has the wrong length");
+}
+
+static void oqs_net_load_peer(void *state, const char *dir) {
+	oqs_state *s = state;
+	s->pk = malloc(s->kem->length_public_key);
+	if (read_file(dir, "pk", s->pk, s->kem->length_public_key) != s->kem->length_public_key)
+		die("pk has the wrong length");
+}
+
+static void oqs_net_reset(void *state) { (void)state; }
+
+static const net_backend oqs_net_backend = {
+	oqs_net_create, oqs_net_keygen, oqs_net_set_peer, oqs_net_encaps, oqs_net_decaps,
+	oqs_net_load_keypair, oqs_net_load_peer, oqs_net_reset,
+};
+
+/* --- OpenSSL ---
+ *
+ * A public key goes on the wire as OpenSSL's encoded public key, the form
+ * a TLS 1.3 key_share carries: X25519 and ML-KEM raw, P-256 an
+ * uncompressed point, ffdhe the public value padded to the group size.
+ * RSA has no encoded public key, so it sends the modulus alone, padded
+ * to the key size; the exponent is fixed at 65537. Those are the sizes
+ * the timing and memory harnesses report as public_key_bytes.
+ */
+
+static int is_rsa(const ossl_alg *a) { return a->rsa_bits != 0; }
+
+static size_t encode_public_key(const ossl_alg *a, EVP_PKEY *key, unsigned char *out, size_t cap) {
+	if (is_rsa(a)) {
+		BIGNUM *n = NULL, *e = NULL;
+		int size = EVP_PKEY_get_size(key);
+		int ok = EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_RSA_N, &n) == 1 &&
+		         EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_RSA_E, &e) == 1 &&
+		         BN_is_word(e, RSA_F4) && (size_t)size <= cap && BN_bn2binpad(n, out, size) == size;
+		BN_free(n);
+		BN_free(e);
+		return ok ? (size_t)size : 0;
+	}
+	unsigned char *encoded = NULL;
+	size_t n = EVP_PKEY_get1_encoded_public_key(key, &encoded);
+	if (n > cap) n = 0;
+	if (n) memcpy(out, encoded, n);
+	OPENSSL_free(encoded);
+	return n;
+}
+
+static EVP_PKEY *decode_rsa_public_key(EVP_PKEY_CTX *ctx, const ossl_alg *a, const unsigned char *in, size_t len) {
+	EVP_PKEY *key = NULL;
+	BIGNUM *n = BN_bin2bn(in, (int)len, NULL), *e = BN_new();
+	OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+	OSSL_PARAM *params = NULL;
+	if (len == (size_t)a->rsa_bits / 8 && n && e && bld && BN_set_word(e, RSA_F4) &&
+	    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, n) == 1 &&
+	    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, e) == 1 &&
+	    (params = OSSL_PARAM_BLD_to_param(bld)) != NULL)
+		EVP_PKEY_fromdata(ctx, &key, EVP_PKEY_PUBLIC_KEY, params);
+	OSSL_PARAM_free(params);
+	OSSL_PARAM_BLD_free(bld);
+	BN_free(n);
+	BN_free(e);
+	return key;
+}
+
+/* The inverse of encode_public_key. NULL if OpenSSL rejects the key. */
+static EVP_PKEY *decode_public_key(const ossl_alg *a, const unsigned char *in, size_t len) {
+	EVP_PKEY *key = NULL;
+	EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, a->keytype, NULL);
+	if (!ctx || EVP_PKEY_fromdata_init(ctx) != 1) {
+		EVP_PKEY_CTX_free(ctx);
+		return NULL;
+	}
+	if (is_rsa(a)) {
+		key = decode_rsa_public_key(ctx, a, in, len);
+	} else if (a->group) {
+		/* EC and DH: a key holding only the group, then the public value. */
+		OSSL_PARAM params[] = {
+			OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, (char *)a->group, 0),
+			OSSL_PARAM_END,
+		};
+		if (EVP_PKEY_fromdata(ctx, &key, EVP_PKEY_KEY_PARAMETERS, params) == 1 &&
+		    EVP_PKEY_set1_encoded_public_key(key, in, len) != 1) {
+			EVP_PKEY_free(key);
+			key = NULL;
+		}
+	} else {
+		OSSL_PARAM params[] = {
+			OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_PUB_KEY, (void *)in, len),
+			OSSL_PARAM_END,
+		};
+		EVP_PKEY_fromdata(ctx, &key, EVP_PKEY_PUBLIC_KEY, params);
+	}
+	EVP_PKEY_CTX_free(ctx);
+	return key;
+}
+
+static void *ossl_net_create(const char *name) {
+	ossl_state *s = calloc(1, sizeof *s);
+	s->alg = find_ossl_alg(name);
+	s->keygen_ctx = new_keygen_ctx(s->alg); /* this side's keypair; ffdh's ephemeral key */
+	return s;
+}
+
+static void ossl_net_reset(void *state) {
+	ossl_state *s = state;
+	EVP_PKEY_CTX_free(s->encaps_ctx);
+	EVP_PKEY_CTX_free(s->decaps_ctx);
+	EVP_PKEY_free(s->key);
+	s->encaps_ctx = s->decaps_ctx = NULL;
+	s->key = NULL;
+}
+
+static int ossl_net_keygen(void *state, const uint8_t **pk, size_t *pk_len) {
+	ossl_state *s = state;
+	ossl_net_reset(s);
+	if (!generate_key(s, &s->key)) return 0;
+	if (!s->alg->ffdh) s->decaps_ctx = new_kem_ctx(s, 0);
+	s->pk_len = encode_public_key(s->alg, s->key, s->pk, sizeof s->pk);
+	*pk = s->pk;
+	*pk_len = s->pk_len;
+	return s->pk_len > 0;
+}
+
+static int ossl_net_set_peer(void *state, const uint8_t *pk, size_t pk_len) {
+	ossl_state *s = state;
+	ossl_net_reset(s);
+	s->key = decode_public_key(s->alg, pk, pk_len);
+	if (!s->key) return 0;
+	if (!s->alg->ffdh) s->encaps_ctx = new_kem_ctx(s, 1);
+	return 1;
+}
+
+static int ossl_net_encaps(void *state, const uint8_t **ct, size_t *ct_len, const uint8_t **ss, size_t *ss_len) {
+	ossl_state *s = state;
+	*ct_len = sizeof s->out_ct;
+	s->out_ss_len = sizeof s->out_ss;
+	int ok = ossl_encapsulate(s, s->out_ct, ct_len, s->out_ss, &s->out_ss_len);
+	ossl_cleanup(s);
+	*ct = s->out_ct;
+	*ss = s->out_ss;
+	*ss_len = s->out_ss_len;
+	return ok;
+}
+
+static int ossl_net_decaps(void *state, const uint8_t *ct, size_t ct_len, const uint8_t **ss, size_t *ss_len) {
+	ossl_state *s = state;
+	s->out_ss_len = sizeof s->out_ss;
+	int ok = ossl_decapsulate(s, ct, ct_len, s->out_ss, &s->out_ss_len);
+	ossl_cleanup(s);
+	*ss = s->out_ss;
+	*ss_len = s->out_ss_len;
+	return ok;
+}
+
+static void ossl_net_load_keypair(void *state, const char *dir) {
+	ossl_state *s = state;
+	s->key = load_key_params(s->alg, EVP_PKEY_KEYPAIR, dir, "keypair.params");
+	if (!s->alg->ffdh) s->decaps_ctx = new_kem_ctx(s, 0);
+}
+
+static void ossl_net_load_peer(void *state, const char *dir) {
+	ossl_state *s = state;
+	s->key = load_key_params(s->alg, EVP_PKEY_PUBLIC_KEY, dir, "public.params");
+	if (!s->alg->ffdh) s->encaps_ctx = new_kem_ctx(s, 1);
+}
+
+static const net_backend ossl_net_backend = {
+	ossl_net_create, ossl_net_keygen, ossl_net_set_peer, ossl_net_encaps, ossl_net_decaps,
+	ossl_net_load_keypair, ossl_net_load_peer, ossl_net_reset,
+};
+
+/* ================================================================
+ * server / client
+ *
+ * One key exchange per TCP connection. Every message is a 4-byte
+ * big-endian length followed by the payload. Each flight is handed to
+ * the kernel in one sendmsg() call, with TCP_NODELAY set, so it leaves
+ * in as few segments as its size allows. (Corking the first message with
+ * MSG_MORE is not enough: an ACK arriving before the next send pushes
+ * the corked tail out as a segment of its own.)
+ *
+ *   ephemeral                          cached-key
+ *   C: keygen                          C: encaps (to the cached key)
+ *   C -> S: pk                         C -> S: ct
+ *   S: encaps                          S: decaps
+ *   S -> C: ct, confirm_S              S -> C: confirm_S
+ *   C: decaps, check confirm_S         C: check confirm_S
+ *   C -> S: confirm_C                  C -> S: confirm_C
+ *   S: check confirm_C                 S: check confirm_C
+ *
+ * confirm_X = SHA-256(label_X || shared secret), 32 bytes, with a
+ * different label each way so neither side can echo the other. Then
+ * the client half-closes, the server closes, and the client waits for
+ * that close, so handshakes never overlap.
+ *
+ * Times, in ns:
+ *   connect  client: connect() call to return, the TCP handshake
+ *   keygen / encaps / decaps
+ *            this side's KEM work. encaps on the ephemeral server
+ *            includes taking the public key off the wire (for OpenSSL,
+ *            decoding and checking it).
+ *   secret   from the start until this side holds the shared secret
+ *   agreed   from the start until this side has checked the peer's
+ *            confirmation, i.e. knows both sides hold the same key
+ * The client's start is just before connect(); the server's is when
+ * accept() returns, after the TCP handshake.
+ * ================================================================ */
+
+#define NET_MSG_MAX ((size_t)4 << 20) /* above the largest public key, 1,357,824 B */
+#define NET_TIMEOUT_SECONDS 60
+#define CONFIRM_BYTES 32
+
+#define HANDSHAKE_FIELDS                                                                    \
+	"index,connect_ns,keygen_ns,encaps_ns,decaps_ns,secret_ns,agreed_ns,"                     \
+	"public_key_bytes,ciphertext_bytes,app_bytes_sent,app_bytes_received,"                    \
+	"if_tx_packets,if_tx_bytes,if_rx_packets,if_rx_bytes,"                                    \
+	"tcp_segs_out,tcp_segs_in,tcp_total_retrans,tcp_rtt_us,tcp_snd_cwnd"
+
+typedef struct {
+	int fd;
+	uint64_t sent, received; /* application bytes, length prefixes included */
+} conn;
+
+typedef struct {
+	uint64_t tx_packets, tx_bytes, rx_packets, rx_bytes;
+} if_counters;
+
+typedef struct {
+	long index;
+	int64_t connect_ns, keygen_ns, encaps_ns, decaps_ns, secret_ns, agreed_ns;
+	size_t pk_bytes, ct_bytes;
+	conn c;
+	if_counters ifc; /* -1 when not recorded */
+	struct tcp_info tcp;
+} handshake;
+
+typedef struct {
+	const void *data;
+	size_t len;
+} message;
+
+/* Send one flight: up to two messages, each with its length prefix. */
+static int send_flight(conn *c, const message *msgs, int count) {
+	uint32_t prefixes[2];
+	struct iovec iov[4];
+	int n = 0;
+	if (count > 2) die("flight too long");
+	for (int i = 0; i < count; i++) {
+		prefixes[i] = htonl((uint32_t)msgs[i].len);
+		iov[n++] = (struct iovec){&prefixes[i], sizeof prefixes[i]};
+		iov[n++] = (struct iovec){(void *)msgs[i].data, msgs[i].len};
+	}
+	struct msghdr mh = {.msg_iov = iov, .msg_iovlen = (size_t)n};
+	while (mh.msg_iovlen > 0) {
+		ssize_t sent = sendmsg(c->fd, &mh, MSG_NOSIGNAL);
+		if (sent < 0 && errno == EINTR) continue;
+		if (sent <= 0) return 0;
+		c->sent += (uint64_t)sent;
+		/* A blocking send can still stop early (on a timeout): skip what went. */
+		for (size_t done = (size_t)sent; done > 0;) {
+			size_t step = done < mh.msg_iov->iov_len ? done : mh.msg_iov->iov_len;
+			mh.msg_iov->iov_base = (char *)mh.msg_iov->iov_base + step;
+			mh.msg_iov->iov_len -= step;
+			done -= step;
+			if (mh.msg_iov->iov_len == 0) {
+				mh.msg_iov++;
+				mh.msg_iovlen--;
+			}
+		}
+	}
+	return 1;
+}
+
+static int recv_all(conn *c, void *buf, size_t len) {
+	for (char *p = buf; len > 0;) {
+		ssize_t n = recv(c->fd, p, len, 0);
+		if (n < 0 && errno == EINTR) continue;
+		if (n <= 0) return 0;
+		p += n;
+		len -= (size_t)n;
+		c->received += (uint64_t)n;
+	}
+	return 1;
+}
+
+/* Returns the payload length, or -1. */
+static long recv_msg(conn *c, void *buf, size_t cap) {
+	uint32_t prefix;
+	if (!recv_all(c, &prefix, sizeof prefix)) return -1;
+	size_t len = ntohl(prefix);
+	if (len > cap || !recv_all(c, buf, len)) return -1;
+	return (long)len;
+}
+
+/* After our last message: half-close and wait for the peer to close. */
+static int await_close(conn *c) {
+	char extra;
+	if (shutdown(c->fd, SHUT_WR) != 0) return 0;
+	return recv(c->fd, &extra, 1, 0) == 0;
+}
+
+static void confirm_tag(const char *label, const uint8_t *ss, size_t ss_len, uint8_t out[CONFIRM_BYTES]) {
+	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+	unsigned int n = 0;
+	if (!ctx || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+	    EVP_DigestUpdate(ctx, label, strlen(label) + 1) != 1 ||
+	    EVP_DigestUpdate(ctx, ss, ss_len) != 1 || EVP_DigestFinal_ex(ctx, out, &n) != 1 ||
+	    n != CONFIRM_BYTES)
+		die("SHA-256 failed");
+	EVP_MD_CTX_free(ctx);
+}
+
+/* Send `first` (if any) and this side's confirmation as one flight. */
+static int send_with_confirm(conn *c, const message *first, const char *label, const uint8_t *ss,
+                             size_t ss_len) {
+	uint8_t tag[CONFIRM_BYTES];
+	confirm_tag(label, ss, ss_len, tag);
+	message msgs[2];
+	int n = 0;
+	if (first) msgs[n++] = *first;
+	msgs[n++] = (message){tag, sizeof tag};
+	return send_flight(c, msgs, n);
+}
+
+static int check_confirm(conn *c, const char *label, const uint8_t *ss, size_t ss_len) {
+	uint8_t expected[CONFIRM_BYTES], got[CONFIRM_BYTES];
+	confirm_tag(label, ss, ss_len, expected);
+	return recv_msg(c, got, sizeof got) == CONFIRM_BYTES && memcmp(got, expected, CONFIRM_BYTES) == 0;
+}
+
+static void set_socket_options(int fd) {
+	int one = 1;
+	struct timeval timeout = {.tv_sec = NET_TIMEOUT_SECONDS};
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one) != 0 ||
+	    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout) != 0 ||
+	    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout) != 0)
+		die("setsockopt failed");
+}
+
+static void read_tcp_info(handshake *h) {
+	socklen_t len = sizeof h->tcp;
+	memset(&h->tcp, 0, sizeof h->tcp);
+	getsockopt(h->c.fd, IPPROTO_TCP, TCP_INFO, &h->tcp, &len);
+}
+
+static uint64_t read_counter(const char *iface, const char *name) {
+	char path[256];
+	unsigned long long v = 0;
+	snprintf(path, sizeof path, "/sys/class/net/%s/statistics/%s", iface, name);
+	FILE *f = fopen(path, "r");
+	if (!f || fscanf(f, "%llu", &v) != 1) die("cannot read interface counters");
+	fclose(f);
+	return v;
+}
+
+static if_counters read_if_counters(const char *iface) {
+	return (if_counters){read_counter(iface, "tx_packets"), read_counter(iface, "tx_bytes"),
+	                     read_counter(iface, "rx_packets"), read_counter(iface, "rx_bytes")};
+}
+
+static int64_t elapsed(uint64_t since) { return (int64_t)(now_ns() - since); }
+
+static void print_handshake(const handshake *h) {
+	printf("H,%ld,%lld,%lld,%lld,%lld,%lld,%lld,%zu,%zu,%llu,%llu,%lld,%lld,%lld,%lld,%u,%u,%u,%u,%u\n",
+	       h->index, (long long)h->connect_ns, (long long)h->keygen_ns, (long long)h->encaps_ns,
+	       (long long)h->decaps_ns, (long long)h->secret_ns, (long long)h->agreed_ns, h->pk_bytes,
+	       h->ct_bytes, (unsigned long long)h->c.sent, (unsigned long long)h->c.received,
+	       (long long)h->ifc.tx_packets, (long long)h->ifc.tx_bytes, (long long)h->ifc.rx_packets,
+	       (long long)h->ifc.rx_bytes, h->tcp.tcpi_segs_out, h->tcp.tcpi_segs_in,
+	       h->tcp.tcpi_total_retrans, h->tcp.tcpi_rtt, h->tcp.tcpi_snd_cwnd);
+}
+
+static void reset_handshake(handshake *h, long index) {
+	memset(h, 0, sizeof *h);
+	h->index = index;
+	h->c.fd = -1;
+	h->connect_ns = h->keygen_ns = h->encaps_ns = h->decaps_ns = -1;
+	h->secret_ns = h->agreed_ns = -1;
+	h->ifc = (if_counters){(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
+}
+
+static const net_backend *select_net_backend(const char *impl) {
+	if (strcmp(impl, "liboqs") == 0) return &oqs_net_backend;
+	if (strcmp(impl, "openssl") == 0) return &ossl_net_backend;
+	usage();
+	return NULL;
+}
+
+/* --- server --- */
+
+/* One handshake on an accepted connection. Returns NULL or a reason. */
+static const char *serve_handshake(const net_backend *b, void *state, int cached, uint8_t *buf, handshake *h) {
+	uint64_t start = now_ns(), t;
+	const uint8_t *ct, *ss;
+	size_t ss_len;
+	long n = recv_msg(&h->c, buf, NET_MSG_MAX);
+	if (n < 0) return "receive first message";
+
+	if (cached) {
+		h->ct_bytes = (size_t)n;
+		t = now_ns();
+		if (!b->decaps(state, buf, (size_t)n, &ss, &ss_len)) return "decaps";
+		h->decaps_ns = elapsed(t);
+		h->secret_ns = elapsed(start);
+		if (!send_with_confirm(&h->c, NULL, "server", ss, ss_len)) return "send confirmation";
+	} else {
+		h->pk_bytes = (size_t)n;
+		t = now_ns();
+		if (!b->set_peer(state, buf, (size_t)n) || !b->encaps(state, &ct, &h->ct_bytes, &ss, &ss_len))
+			return "encaps";
+		h->encaps_ns = elapsed(t);
+		h->secret_ns = elapsed(start);
+		message ct_msg = {ct, h->ct_bytes};
+		if (!send_with_confirm(&h->c, &ct_msg, "server", ss, ss_len)) return "send ciphertext";
+	}
+
+	if (!check_confirm(&h->c, "client", ss, ss_len)) return "client confirmation";
+	h->agreed_ns = elapsed(start);
+	read_tcp_info(h);
+	if (!await_close(&h->c)) return "close";
+	if (!cached) b->reset(state);
+	return NULL;
+}
+
+/* kem_bench server <impl> <alg> <port> <keydir|->. Serves until killed. */
+__attribute__((noreturn)) static int cmd_server(int argc, char **argv) {
+	if (argc != 6) usage();
+	const net_backend *b = select_net_backend(argv[2]);
+	const char *keydir = argv[5];
+	int cached = strcmp(keydir, "-") != 0;
+	void *state = b->create(argv[3]);
+	if (cached) b->load_keypair(state, keydir);
+	uint8_t *buf = malloc(NET_MSG_MAX);
+
+	int one = 1;
+	int listener = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(argv[4])),
+	                           .sin_addr.s_addr = htonl(INADDR_ANY)};
+	if (listener < 0 || setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0 ||
+	    bind(listener, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(listener, 16) != 0)
+		die("cannot listen");
+
+	setvbuf(stdout, NULL, _IOLBF, 0); /* a record per line, for a reader that kills us */
+	printf("M,mode,%s\n", cached ? "cached" : "ephemeral");
+	printf("M,fields,%s\n", HANDSHAKE_FIELDS);
+	printf("M,ready,1\n");
+
+	for (long index = 0;; index++) {
+		handshake h;
+		reset_handshake(&h, index);
+		h.c.fd = accept(listener, NULL, NULL);
+		if (h.c.fd < 0) die("accept failed");
+		set_socket_options(h.c.fd);
+		const char *failure = serve_handshake(b, state, cached, buf, &h);
+		if (failure) {
+			printf("F,%ld,%s\n", index, failure);
+			if (!cached) b->reset(state);
+		} else {
+			print_handshake(&h);
+		}
+		close(h.c.fd);
+	}
+}
+
+/* --- client --- */
+
+static const char *client_handshake(const net_backend *b, void *state, int cached,
+                                    const struct sockaddr_in *addr, uint8_t *buf, handshake *h) {
+	uint64_t start = now_ns(), t;
+	const uint8_t *pk, *ct, *ss;
+	size_t ss_len;
+
+	h->c.fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (h->c.fd < 0) die("socket failed");
+	set_socket_options(h->c.fd);
+	if (connect(h->c.fd, (const struct sockaddr *)addr, sizeof *addr) != 0) return "connect";
+	h->connect_ns = elapsed(start);
+
+	if (cached) {
+		t = now_ns();
+		if (!b->encaps(state, &ct, &h->ct_bytes, &ss, &ss_len)) die("encaps failed");
+		h->encaps_ns = elapsed(t);
+		h->secret_ns = elapsed(start);
+		message ct_msg = {ct, h->ct_bytes};
+		if (!send_flight(&h->c, &ct_msg, 1)) return "send ciphertext";
+	} else {
+		t = now_ns();
+		if (!b->keygen(state, &pk, &h->pk_bytes)) die("keygen failed");
+		h->keygen_ns = elapsed(t);
+		message pk_msg = {pk, h->pk_bytes};
+		if (!send_flight(&h->c, &pk_msg, 1)) return "send public key";
+
+		long n = recv_msg(&h->c, buf, NET_MSG_MAX);
+		if (n < 0) return "receive ciphertext";
+		h->ct_bytes = (size_t)n;
+		t = now_ns();
+		if (!b->decaps(state, buf, (size_t)n, &ss, &ss_len)) return "decaps";
+		h->decaps_ns = elapsed(t);
+		h->secret_ns = elapsed(start);
+	}
+
+	if (!check_confirm(&h->c, "server", ss, ss_len)) return "server confirmation";
+	h->agreed_ns = elapsed(start);
+	if (!send_with_confirm(&h->c, NULL, "client", ss, ss_len)) return "send confirmation";
+	if (!await_close(&h->c)) return "close";
+	read_tcp_info(h);
+	if (!cached) b->reset(state);
+	return NULL;
+}
+
+/* kem_bench client <impl> <alg> <host> <port> <count> <keydir|-> <iface|->
+ *
+ * Interface counters are read just before each connect(), and each
+ * handshake is charged the difference to the next reading, so packets
+ * still queued (by netem, say) when the connection closes are not lost.
+ * The last reading follows a one-second pause. */
+static int cmd_client(int argc, char **argv) {
+	if (argc != 9) usage();
+	const net_backend *b = select_net_backend(argv[2]);
+	long count = atol(argv[6]);
+	const char *keydir = argv[7], *iface = argv[8];
+	int cached = strcmp(keydir, "-") != 0, counters = strcmp(iface, "-") != 0;
+	void *state = b->create(argv[3]);
+	if (cached) b->load_peer(state, keydir);
+	uint8_t *buf = malloc(NET_MSG_MAX);
+
+	struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(argv[5]))};
+	if (inet_pton(AF_INET, argv[4], &addr.sin_addr) != 1) die("host must be an IPv4 address");
+
+	printf("M,mode,%s\n", cached ? "cached" : "ephemeral");
+	printf("M,fields,%s\n", HANDSHAKE_FIELDS);
+
+	handshake h;
+	const char *failure = NULL;
+	if_counters before = {0};
+	for (long index = 0; index <= count; index++) {
+		/* Charge the previous handshake with the counters since it began. */
+		if (counters) {
+			if (index == count) sleep(1);
+			if_counters now = read_if_counters(iface);
+			if (index > 0)
+				h.ifc = (if_counters){now.tx_packets - before.tx_packets, now.tx_bytes - before.tx_bytes,
+				                      now.rx_packets - before.rx_packets, now.rx_bytes - before.rx_bytes};
+			before = now;
+		}
+		if (index > 0) {
+			if (failure) printf("F,%ld,%s\n", h.index, failure);
+			else print_handshake(&h);
+		}
+		if (index == count) break;
+
+		reset_handshake(&h, index);
+		failure = client_handshake(b, state, cached, &addr, buf, &h);
+		close(h.c.fd);
+		if (failure && !cached) b->reset(state);
+	}
+	return 0;
+}
+
 int main(int argc, char **argv) {
 	if (argc < 2) usage();
 	const char *cmd = argv[1];
@@ -1023,5 +1683,7 @@ int main(int argc, char **argv) {
 	if (strcmp(cmd, "once") == 0) return cmd_once(argc, argv, 1);
 	if (strcmp(cmd, "baseline") == 0) return cmd_once(argc, argv, 0);
 	if (strcmp(cmd, "memory") == 0) return cmd_memory(argc, argv);
+	if (strcmp(cmd, "server") == 0) return cmd_server(argc, argv);
+	if (strcmp(cmd, "client") == 0) return cmd_client(argc, argv);
 	usage();
 }

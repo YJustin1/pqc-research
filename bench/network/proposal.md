@@ -2,22 +2,30 @@
 
 How we could measure what ML-KEM, Classic McEliece and NTRU cost on the
 wire, from a clean link on one machine to real networks and a phone.
-Nothing here is built yet. The metrics this covers are listed under
-"Network" in [`../criteria.md`](../criteria.md).
+The metrics this covers are listed under "Network" in
+[`../criteria.md`](../criteria.md).
+
+Status on 2026-10-13: steps 1 to 3 below are built and have been run
+(see [`README.md`](README.md)). The client and server ended up as two
+subcommands, `kem_bench client` and `kem_bench server`, instead of two
+programs, and `run_network.py` is the driver. Packet counts come from
+interface counters rather than `tcpdump`. A one-off `tcpdump`/`tshark`
+capture of the same handshakes matched them exactly. The namespaces run
+inside an unprivileged user namespace, so no root is needed.
 
 ## What we want to know
 
 For one key exchange between a client and a server:
 
-- **Bytes on the wire**, per direction. The raw KEM contribution is
+- Bytes on the wire, per direction. The raw KEM contribution is
   public key plus ciphertext, which we already know from `sizes.csv`.
   What's new is the framing on top: TCP/IP headers and, if we use it,
   TLS.
-- **Packets**, per direction, at a realistic MTU of 1500 bytes.
-- **Round trips**, and **time to shared secret**: from the moment the
+- Packets per direction, at a realistic MTU of 1500 bytes.
+- Round trips, and time to shared secret: from the moment the
   client connects until both sides hold the same key. Each side measures
   its own KEM compute, and network time is the rest.
-- **Retransmissions and failures**: lost packets that had to be re-sent,
+- Retransmissions and failures: lost packets that had to be re-sent,
   and handshakes that timed out.
 
 These split into two kinds. Bytes and packets are fixed by the protocol:
@@ -34,7 +42,8 @@ below are for.
 
 ## Two protocols
 
-**A bare KEM exchange over TCP, written by us.** The client generates a
+The first is a bare KEM exchange over TCP that we write ourselves. The
+client generates a
 keypair and sends the public key. The server encapsulates and sends back
 the ciphertext. The client decapsulates. Both sides then exchange a hash
 of the shared secret to confirm they agree; those bytes get counted
@@ -43,30 +52,30 @@ works for all three schemes and every parameter set in
 [`../algorithms.md`](../algorithms.md), and it isolates the
 KEM from everything a real protocol adds. It's a small C program against
 liboqs and OpenSSL, which fits the "our code is benchmarking tooling"
-rule. The OpenSSL side runs the classical baselines in
-[`../algorithms.md`](../algorithms.md) through the same exchange, through OpenSSL's KEM interface
-(see
+rule. The OpenSSL side puts the classical baselines in
+[`../algorithms.md`](../algorithms.md) through the same exchange, using
+OpenSSL's KEM interface (see
 [`classical-baselines.md`](../../docs/algorithms/classical-baselines.md)),
 so every scheme is compared against what it would replace. It
 mirrors TLS 1.3, where the client sends the key share and the server
 encapsulates to it.
 
-We'd also run a **cached-key** variant, where the server's long-term
+We'd also run a cached-key variant, where the server's long-term
 public key is already on the client and only a ciphertext crosses the
 wire. That's how Classic McEliece is meant to be used, and without it the
 comparison is unfair to McEliece.
 
-**TLS 1.3, for realism.** OpenSSL 3.5 and later supports ML-KEM
-natively. The
-Open Quantum Safe project's `oqs-provider` plugs other liboqs KEMs into
+The second is TLS 1.3, for realism. OpenSSL 3.5 and later supports
+ML-KEM natively. The Open Quantum Safe project's `oqs-provider` plugs other liboqs KEMs into
 OpenSSL, but its `ALGORITHMS.md` lists only FrodoKEM, ML-KEM, BIKE and
 HQC as KEMs, with no NTRU or Classic McEliece (checked 2026-10-05). The
 TLS leg can therefore compare only the classical baselines and
 ML-KEM. Hybrid key exchanges such as X25519MLKEM768 are out of scope,
 because they are not pure versions of any scheme in
 [`../algorithms.md`](../algorithms.md). `openssl s_server` and `openssl s_client`
-are enough to drive it. **Classic McEliece can't take part.** TLS 1.3 limits a key share to
-65,535 bytes (RFC 8446), and McEliece's smallest public key is 261,120.
+are enough to drive it. Classic McEliece can't take part: TLS 1.3
+limits a key share to 65,535 bytes (RFC 8446), and McEliece's smallest
+public key is 261,120.
 That's a finding for the report in its own right.
 
 We'd start with the bare exchange, since it covers everything and
@@ -93,10 +102,10 @@ data. McEliece pcaps will be megabytes each.
 
 Two things will give wrong packet counts if we're not careful:
 
-- **Loopback has an MTU of 65,536**, so a 1 MB key crosses `lo` in a
+- Loopback has an MTU of 65,536, so a 1 MB key crosses `lo` in a
   handful of giant packets. Local tests should run between two network
   namespaces joined by a `veth` pair with the MTU set to 1500.
-- **Segmentation offload** (TSO, GSO and GRO) lets the kernel hand
+- Segmentation offload (TSO, GSO and GRO) lets the kernel hand
   oversized segments to the capture point, so `tcpdump` on the sending
   host sees fewer, bigger packets than actually go out. We'd turn these
   off on the capture interface with `ethtool -K <if> tso off gso off gro off`,
@@ -119,7 +128,8 @@ is trusted.
 ## Layer 2: emulated networks, based on measured ones
 
 The same namespaces, with `tc netem` imposing delay, jitter, loss and a
-bandwidth cap. Root is needed, which we have on the workstation.
+bandwidth cap. This doesn't need root: inside an unprivileged user
+namespace we can add `netem` qdiscs to our own interfaces.
 
 Rather than inventing numbers, we'd first measure a few real paths
 with `ping` and `mtr`, recording round-trip time, jitter and loss:
@@ -131,7 +141,7 @@ with `ping` and `mtr`, recording round-trip time, jitter and loss:
 Each measured path becomes a `netem` profile. We'd add one deliberately
 lossy profile, as a stress case, and the clean link as a baseline.
 
-**Competing traffic** is what separates this from a clean link. For each
+Competing traffic is what separates this from a clean link. For each
 profile we'd run the handshakes twice: once alone, and once while an
 `iperf3` bulk transfer shares the same bandwidth-capped bottleneck. The
 handshakes then queue behind real traffic, which is where a multi-round
@@ -149,33 +159,32 @@ layer 2 predicts reality rather than serving as the main data. For each
 real path, we'd compare the measured time to shared secret against the
 matching `netem` profile.
 
-**WSL2 to a UTCS lab host.** Some practical problems to sort out first:
+The first path is WSL2 to a UTCS lab host, which has some practical
+problems to sort out first:
 
-- **We can only capture on our side.** `tcpdump` needs root, and we
+- We can only capture on our side. `tcpdump` needs root, and we
   don't have root on UTCS machines. Server-side timings still come from
   the server program's own output.
-- **The lab host must be reachable on a high port** from wherever the
+- The lab host must be reachable on a high port from wherever the
   workstation is. The department probably blocks everything but SSH
   from outside, so this may only work on campus or over the VPN.
   Tunnelling through SSH would work but distorts both byte counts and
   timing, so it's a last resort.
-- **The lab hosts are heavily loaded**, around 47 on 16 CPUs on
+- The lab hosts are heavily loaded, around 47 on 16 CPUs on
   grape-nuts, so server-side compute times there won't be clean. We'd
   report network time and treat server compute as indicative.
-- **Policy.** Running a listening process on a shared department machine
+- Policy: running a listening process on a shared department machine
   is probably fine for short tests on a high port, but it's worth
   checking with the department first.
 
-**A small cloud VM in another region.** This avoids most of the UTCS
-problems: we'd have root to capture at both ends, open ports, and a
+A small cloud VM in another region avoids most of the UTCS problems: we'd have root to capture at both ends, open ports, and a
 genuinely long internet path. It's also the natural server for the phone,
 since a phone on mobile data can't reach a workstation behind home NAT.
 
-**A phone on mobile data**, talking to the cloud VM. This is the most
-realistic path we can get, and the one closest to the professor's
-concern.
+A phone on mobile data, talking to the cloud VM, is the most realistic
+path we can get, and the one closest to the professor's concern.
 
-**Middleboxes** are the one real-world effect no emulation shows.
+Middleboxes are the one real-world effect no emulation shows.
 Firewalls and other network equipment sometimes mishandle a handshake
 that doesn't fit in a single packet. When Chrome started sending
 post-quantum key shares, some broken middleboxes dropped the larger TLS
@@ -228,11 +237,10 @@ real-path check. Layer 4 is a stretch goal.
    ML-KEM.
 8. Layer 4, if time allows.
 
-This follows established practice. As far as we know, Paquin, Stebila
-and Tamvada, "Benchmarking Post-Quantum Cryptography in TLS" (PQCrypto
-2020), measured TLS handshakes over network namespaces with `netem`
-impairments in much the same way; that needs confirming against the
-paper before we cite it.
+As far as we know, Paquin, Stebila and Tamvada, "Benchmarking
+Post-Quantum Cryptography in TLS" (PQCrypto 2020), measured TLS
+handshakes over network namespaces with `netem` impairments in much the
+same way. That needs confirming against the paper before we cite it.
 
 ## Open questions
 
