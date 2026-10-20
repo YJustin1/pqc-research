@@ -5,13 +5,21 @@ wire, from a clean link on one machine to real networks and a phone.
 The metrics this covers are listed under "Network" in
 [`../criteria.md`](../criteria.md).
 
-Status on 2026-10-13: steps 1 to 3 below are built and have been run
-(see [`README.md`](README.md)). The client and server ended up as two
-subcommands, `kem_bench client` and `kem_bench server`, instead of two
-programs, and `run_network.py` is the driver. Packet counts come from
-interface counters rather than `tcpdump`. A one-off `tcpdump`/`tshark`
-capture of the same handshakes matched them exactly. The namespaces run
-inside an unprivileged user namespace, so no root is needed.
+Status on 2026-10-20: steps 1 to 3 of the build order below are built
+and have been run (see [`README.md`](README.md)). The client and server
+ended up as two subcommands, `kem_bench client` and `kem_bench server`,
+instead of two programs, and `run_network.py` is the driver. Packet
+counts come from interface counters rather than `tcpdump`. A one-off
+`tcpdump`/`tshark` capture of the same handshakes matched them exactly.
+The namespaces run inside an unprivileged user namespace, so no root is
+needed. Since 2026-10-20 they form a dumbbell through a router
+namespace, so competing traffic can share a capped bottleneck, and
+`--netem "... rate ..."` and `--competing N` work.
+
+The plan changed on 2026-10-20. The UTCS lab hosts are lightly loaded,
+so a path to one adds no stress, and measuring our own paths for
+profiles is replaced by public measurement data. The phone stays as the
+one real path. The build order below is the revised one.
 
 ## What we want to know
 
@@ -117,7 +125,7 @@ because loss produces a long tail that the mean hides.
 
 ## Layer 1: a clean link
 
-Two network namespaces on the WSL2 workstation, joined by a `veth` pair
+Network namespaces on the WSL2 workstation, joined by `veth` links
 with the MTU at 1500 and no impairment. This measures bytes and packets
 for every parameter set, in both protocols and in the cached-key variant.
 Byte counts are deterministic, so one run each is enough. They should
@@ -125,73 +133,75 @@ equal public key plus ciphertext plus a predictable amount of framing,
 which checks the whole pipeline against `sizes.csv` before anything else
 is trusted.
 
-## Layer 2: emulated networks, based on measured ones
+## Layer 2: emulated networks
 
 The same namespaces, with `tc netem` imposing delay, jitter, loss and a
-bandwidth cap. This doesn't need root: inside an unprivileged user
-namespace we can add `netem` qdiscs to our own interfaces.
+bandwidth cap on the router-server bottleneck. This doesn't need root:
+inside an unprivileged user namespace we can add qdiscs to our own
+interfaces. It runs in three stages.
 
-Rather than inventing numbers, we'd first measure a few real paths
-with `ping` and `mtr`, recording round-trip time, jitter and loss:
+First, a sweep with no competing traffic: bandwidth at 1, 10 and
+100 Mbit/s and uncapped, round-trip time near 0, 20 and 100 ms, and
+optionally 1% loss. This shows how each scheme's size turns into time:
+where it starts paying extra round trips because its flight outgrows
+TCP's initial window, and where sending time overtakes round-trip time.
 
-- the campus LAN to a UTCS lab host;
-- home broadband to the same host;
-- a phone's mobile data connection.
+Second, competing traffic. At a few points from the sweep, the
+handshakes run once alone and once while `iperf3` bulk transfers share
+the capped bottleneck. The queue in front of the cap decides how much
+the handshakes suffer, so it is chosen deliberately, in two forms:
 
-Each measured path becomes a `netem` profile. We'd add one deliberately
-lossy profile, as a stress case, and the clean link as a baseline.
+- a first-in-first-out queue sized to a fixed delay at the capped rate,
+  around 50 to 100 ms, a common rule of thumb for router buffers;
+- `fq_codel`, the default queue on many Linux systems, which keeps each
+  flow separate, so a small handshake doesn't wait behind bulk traffic.
 
-Competing traffic is what separates this from a clean link. For each
-profile we'd run the handshakes twice: once alone, and once while an
-`iperf3` bulk transfer shares the same bandwidth-capped bottleneck. The
-handshakes then queue behind real traffic, which is where a multi-round
-trip McEliece exchange should suffer most.
+netem's default 1,000-packet queue, about 1.2 s at 10 Mbit/s, stays as
+one deliberate worst case. First runs with it slowed ML-KEM-768 from
+42 ms to over 2 s (see [`README.md`](README.md)).
 
-This layer gives the main results. It's realistic because the profiles
-come from real paths, and it's controlled, so a difference between
-schemes can be attributed to the scheme rather than to whatever the
-network happened to be doing that minute.
+Third, profiles from public measurement data instead of measuring our
+own paths: three or four connection types (for example fiber, cable,
+DSL, and satellite or mobile) from the FCC's Measuring Broadband America
+published tables, with M-Lab's NDT data as a fallback. Each becomes a
+`netem` profile: half the round-trip time as delay each way, upload and
+download rates, and loss. Upload and download differ, so the harness
+needs separate settings per direction. These profiles give the headline
+"on realistic connections" results, and every scheme runs on them.
 
-## Layer 3: real paths, to check the emulation
+This layer gives the main results. It's controlled, so a difference
+between schemes can be attributed to the scheme rather than to whatever
+the network happened to be doing that minute.
 
-Real networks can't be reproduced run to run, so these runs check that
-layer 2 predicts reality rather than serving as the main data. For each
-real path, we'd compare the measured time to shared secret against the
-matching `netem` profile.
+## Layer 3: the phone, the one real path
 
-The first path is WSL2 to a UTCS lab host, which has some practical
-problems to sort out first:
+A phone on mobile data, running our own client, talking to a server on
+a small cloud VM. It is the most realistic path we can get, the one
+closest to the professor's concern, and the only real path left in the
+plan. It covers three things the emulation can't:
 
-- We can only capture on our side. `tcpdump` needs root, and we
-  don't have root on UTCS machines. Server-side timings still come from
-  the server program's own output.
-- The lab host must be reachable on a high port from wherever the
-  workstation is. The department probably blocks everything but SSH
-  from outside, so this may only work on campus or over the VPN.
-  Tunnelling through SSH would work but distorts both byte counts and
-  timing, so it's a last resort.
-- The lab hosts are heavily loaded, around 47 on 16 CPUs on
-  grape-nuts, so server-side compute times there won't be clean. We'd
-  report network time and treat server compute as indicative.
-- Policy: running a listening process on a shared department machine
-  is probably fine for short tests on a high port, but it's worth
-  checking with the department first.
+- whether a layer 2 profile predicts a real mobile path, by comparing
+  the measured time to shared secret against the matching profile. Real
+  networks can't be reproduced run to run, so this checks layer 2
+  rather than replacing it;
+- a limited client: the phone does its own KEM work (see "Devices"), so
+  it shows what phone-class compute adds to the handshake;
+- middleboxes. Firewalls and other network equipment sometimes
+  mishandle a handshake that doesn't fit in a single packet. When Chrome
+  started sending post-quantum key shares, some broken middleboxes
+  dropped the larger TLS ClientHello. This was documented publicly at
+  the time, and we should cite the original reports. A clean result on
+  our path doesn't prove it can't happen elsewhere.
 
-A small cloud VM in another region avoids most of the UTCS problems: we'd have root to capture at both ends, open ports, and a
-genuinely long internet path. It's also the natural server for the phone,
-since a phone on mobile data can't reach a workstation behind home NAT.
+The cloud VM is needed because a phone on mobile data can't reach a
+workstation behind home NAT. It also gives root at the server end, for
+captures. A path from the workstation to a UTCS lab host was planned as
+well, and is dropped: the hosts are lightly loaded, so the path adds no
+stress, and it needed department firewall and policy questions answered.
 
-A phone on mobile data, talking to the cloud VM, is the most realistic
-path we can get, and the one closest to the professor's concern.
-
-Middleboxes are the one real-world effect no emulation shows.
-Firewalls and other network equipment sometimes mishandle a handshake
-that doesn't fit in a single packet. When Chrome started sending
-post-quantum key shares, some broken middleboxes dropped the larger TLS
-ClientHello. This was documented publicly at the time, and we should
-cite the original reports. Real-path runs can check whether it happens
-on the paths we use, though a clean result there doesn't prove it can't
-happen elsewhere.
+Without more real paths, the report has to state two limits: the
+emulation is checked against one path only, and middlebox behaviour is
+checked on one carrier's network only.
 
 ## Layer 4: server load (stretch goal)
 
@@ -220,22 +230,41 @@ unchanged.
 
 ## Minimum scope and build order
 
-For the report, a defensible minimum is layer 1, layer 2 with three or
-four measured profiles run with and without competing traffic, and one
-real-path check. Layer 4 is a stretch goal.
+For the report, a defensible minimum is layer 1, the layer 2 sweep,
+competing traffic under both queues, three or four public-data profiles,
+and the phone check. TLS 1.3 depends on the open question below, and
+layer 4 is a stretch goal.
 
-1. `kem_client` and `kem_server`: the bare KEM exchange, parameter set on
-   the command line, one CSV line of timings each.
-2. A driver script that sets up the namespaces and `netem`, runs the
-   matrix, captures with `tcpdump` and summarises with `tshark`.
-3. Layer 1 runs, with byte counts checked against `sizes.csv`.
-4. Measure the real paths and turn them into `netem` profiles.
-5. Layer 2 runs, with and without `iperf3` competing traffic.
-6. One layer 3 check: the phone on mobile data to a cloud VM, or WSL2 to
-   a lab host if it's reachable.
-7. TLS 1.3 runs with OpenSSL: X25519 and P-256 as baselines, and
-   ML-KEM.
-8. Layer 4, if time allows.
+1. Done: `kem_bench client` and `kem_bench server`, the bare KEM
+   exchange.
+2. Done: `run_network.py`, which sets up the namespaces and `netem`,
+   runs the matrix and summarises. Interface counters replaced
+   `tcpdump`; a capture option for report figures and loss analysis is
+   still to do.
+3. Done: layer 1 runs, with byte counts checked against `sizes.csv`.
+4. Find out why one Classic McEliece handshake failed in each of the
+   2026-10-18 netem runs, before the larger grids push McEliece against
+   the 60-second socket timeout.
+5. Layer 2 sweep: bandwidth and delay, no competing traffic.
+6. Layer 2 competing traffic: `iperf3` through the cap, with a sized
+   FIFO queue and with `fq_codel`, and the default queue as a worst case.
+7. Layer 2 public-data profiles, with separate upload and download
+   settings, run with every scheme.
+8. Layer 3: the phone on mobile data to a cloud VM. Its setup (the VM,
+   the phone, the Termux build, tried first on the Android emulator) can
+   start alongside steps 5 to 7.
+9. TLS 1.3 runs with OpenSSL: X25519 and P-256 as baselines, and
+   ML-KEM, if the report needs them. Either way, Classic McEliece can't
+   be used in TLS 1.3, which is a finding in itself.
+10. Layer 4, if time allows.
+
+Schemes are compared within each condition. For each one we report
+the median and 95th-percentile time to a shared secret and its network
+share; packets, retransmissions and failures; and its slowdown against
+X25519 under the same condition. The large grids use a representative subset
+(X25519, P-256, RSA-2048, ffdhe2048, the three ML-KEM sets, one or two
+NTRU sets, and Classic-McEliece-348864 and -6688128 in both modes). The
+full set runs on the public-data profiles.
 
 As far as we know, Paquin, Stebila and Tamvada, "Benchmarking
 Post-Quantum Cryptography in TLS" (PQCrypto 2020), measured TLS
@@ -245,10 +274,10 @@ same way. That needs confirming against the paper before we cite it.
 ## Open questions
 
 - Is TLS 1.3 the protocol we want to report against, or is the bare
-  exchange enough for the report? The answer decides how much of step 7
-  we need.
-- Is a small cloud VM acceptable, cost-wise? It's the easiest server for
-  the phone and for a long real path.
-- Which UTCS host and port can the workstation reach, and from where?
+  exchange enough for the report? The answer decides whether step 9
+  happens.
+- Is a small cloud VM acceptable, cost-wise? Step 8 needs it.
 - Which phone? It decides the CPU, and whether liboqs' optimised ARM code
   paths apply.
+- Which connection types, and which percentiles of each, should the
+  public-data profiles use?

@@ -17,11 +17,12 @@ same exchange.
 python3 bench/network/run_network.py                         # everything, clean link
 python3 bench/network/run_network.py --algs X25519 ML-KEM-768 --handshakes 100
 python3 bench/network/run_network.py --netem "delay 10ms loss 1%"
+python3 bench/network/run_network.py --netem "delay 10ms rate 10mbit" --competing 4
 ```
 
 You need what the shared driver needs (see
 [`../memory/README.md`](../memory/README.md)), plus `unshare`, `ip`, `tc`
-and `ethtool`. You don't need root. The script re-runs itself inside an
+and `ethtool`, and `iperf3` for `--competing`. You don't need root. The script re-runs itself inside an
 unprivileged user namespace, where it can create its own network
 namespaces, veth pairs and qdiscs. Results go to
 `bench/network/results/<UTC stamp>-<host>/`:
@@ -79,21 +80,47 @@ ML-KEM-1024 exchanges, confirmations included, and so did the reverse.
 
 ## The link
 
-The client runs in namespace `kemcli` (10.47.0.1) and the server in
-`kemsrv` (10.47.0.2), joined by a veth pair. A few settings keep the
-counts honest:
+The namespaces form a dumbbell. The client (`kemcli`, 10.47.1.1), the
+server (`kemsrv`, 10.47.2.1) and a traffic generator (`kemgen`, 10.47.3.1)
+each have a veth link to a router namespace (`kemrtr`). The
+router-server link is the bottleneck. Competing traffic runs between the
+generator and the server, so it shares that bottleneck with the
+handshakes but never crosses the client's link, and the client's
+counters still see only handshakes. Until 2026-10-20 the client and
+server were joined directly by one veth pair. The router adds a
+forwarding hop, so clean-link times from before then aren't exactly
+comparable; byte and packet counts are unchanged.
+
+A few settings keep the counts honest:
 
 - The MTU is 1500. Loopback's MTU of 65,536 would carry a McEliece key
   in a handful of packets.
-- TSO, GSO and GRO are off on both ends, so every packet on the link is
-  a real one of at most 1500 bytes.
+- TSO, GSO and GRO are off on every interface, so every packet on the
+  links is a real one of at most 1500 bytes.
 - IPv6 is off, so neighbour discovery doesn't show up in the counters.
 - `tcp_no_metrics_save` is 1. Otherwise the kernel would remember RTT and
   ssthresh from one connection and reuse them on the next, and the
   handshakes would no longer be independent.
 
-`--netem ARGS` puts the same `tc netem` qdisc on the outgoing side of
-both ends, so a delay of `d` gives a round-trip time of `2d`.
+`--netem ARGS` puts the same `tc netem` qdisc on both ends of the
+bottleneck, outgoing, so a delay of `d` gives a round-trip time of `2d`.
+`rate` caps the bandwidth each way, for example
+`--netem "delay 10ms rate 10mbit"`.
+
+`--competing N` starts `iperf3` with `N` parallel TCP streams from the
+generator to the server (`--competing-reverse`: server to generator).
+They run for 3 seconds before the first handshake, to get past slow
+start, and keep running until the last. The `competing Mbit/s` column
+gives their average rate during each row, from the generator's interface
+counters. Without a `rate` in `--netem` there is no bottleneck to compete
+for, and the script warns.
+
+Under `rate`, the queue in front of the bottleneck matters as much as
+the rate. netem's default queue holds 1,000 packets, about 1.2 s of data
+at 10 Mbit/s. Bulk TCP flows keep a queue like that full, so every
+handshake packet waits behind it, and packets that arrive when it is
+full are dropped. `limit N` in `--netem` sets the queue length in
+packets.
 
 ## What is measured
 
@@ -104,10 +131,18 @@ Packets and wire bytes in each direction come from the client
 interface's `tx_*` and `rx_*` counters. The client reads them just before
 each `connect()` and charges each handshake with the difference to the
 next reading. That also catches anything netem was still holding when the
-connection closed. The counts include the TCP handshake, the teardown and
+connection closed, but charges it to the next handshake, so under netem
+one handshake's packet count can be a packet high and its neighbour's a
+packet low. Totals are unaffected. All four counters come from one line
+of `/proc/net/dev`, a single kernel snapshot. Reading the four sysfs files
+one at a time let a packet netem released in between land in the bytes
+but not the packets. The counts include the TCP handshake, the teardown and
 pure ACKs, and wire bytes include the 14-byte Ethernet header. Under
-netem, a packet dropped on the client's way out never reaches the
-counter, but its retransmission does.
+netem, a packet the bottleneck drops on the way to the server has
+already been counted as sent by the client, and its retransmission is
+counted again. One dropped on the way back never reaches the client's
+counter. (Before the dumbbell, netem sat on the client's own interface,
+so packets it dropped on the way out were never counted.)
 
 Application bytes sent and received are counted with the length prefixes
 included. At the end of the handshake, `TCP_INFO` gives segments in and
@@ -167,11 +202,14 @@ bytes of prefix per message and two 36-byte confirmations. Public-key
 and ciphertext sizes must match the newest
 `bench/memory/results/*/sizes.csv`.
 
-For every handshake without retransmissions, wire bytes must equal
+For every handshake where neither it nor the one before it had
+retransmissions, wire bytes must equal
 application bytes plus 66 bytes per packet (14 Ethernet, 20 IPv4, and 32
 for TCP with timestamps), plus another 8 for each SYN, whose options are
 longer. If offloads were handing the counters fewer, larger packets than
-were actually sent, this check would fail.
+were actually sent, this check would fail. The previous handshake has
+to be clean too because its late packets are charged to this one, and
+after a loss those ACKs carry SACK options, 12 bytes longer.
 
 ## Layer 1: clean link (2026-10-13, workstation)
 
@@ -231,6 +269,34 @@ counters exactly, for every handshake. That includes McEliece's ACK
 counts from server to client, which ranged from 34 to 89. The check was
 a one-off script; `run_network.py` doesn't run it.
 
+## Bandwidth caps and competing traffic (2026-10-20, workstation)
+
+First runs of the dumbbell, liboqs, ephemeral mode, 20 handshakes per
+row, with `--netem "delay 10ms rate 10mbit"`:
+[`20261020T070558Z-DESKTOP-JustinY`](results/20261020T070558Z-DESKTOP-JustinY/summary.md)
+without competing traffic, and
+[`20261020T070612Z-DESKTOP-JustinY`](results/20261020T070612Z-DESKTOP-JustinY/summary.md)
+with `--competing 4`.
+
+| set | competing | median ms | p95 ms | retrans | competing Mbit/s |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ML-KEM-768 | none | 42.5 | 42.6 | 0 | — |
+| ML-KEM-768 | 4 streams | 2,144.2 | 2,471.7 | 35 | 10.3 |
+| Classic-McEliece-348864 | none | 304.0 | 330.4 | 0 | — |
+| Classic-McEliece-348864 | 4 streams | 8,367.7 | 18,413.6 | 100 | 9.9 |
+
+Observed: the competing streams held the bottleneck at its 10 Mbit/s,
+and every handshake slowed by seconds, with retransmissions in both rows.
+
+Interpretation: with netem's default 1,000-packet queue, the bulk flows
+keep about 1.2 s of data queued at the bottleneck, and the handshake's
+packets wait behind it or are dropped when it overflows. ML-KEM-768's
+2.1 s median fits a couple of those waits or one-second retransmission
+timeouts; we haven't traced which. Either way it reflects the queue,
+not the KEM. These numbers measure the queue
+we happened to get, so they shouldn't be reported until the queue is
+chosen deliberately.
+
 ## Not yet done
 
 Counting doesn't need packet captures, as the cross-check shows.
@@ -238,9 +304,11 @@ Captures would still help with per-packet figures. Under netem loss,
 capturing at both ends would also show which packets were dropped.
 `run_network.py` has no capture option yet.
 
-`--netem` works, but the layer 2 profiles should come from measured
-paths (proposal step 4). There's no option yet for competing `iperf3`
-traffic.
+`--netem` works, but the layer 2 sweep and the public-data profiles
+(proposal steps 5 and 7) haven't been run, and the harness can't yet set
+upload and download separately. Competing `iperf3` traffic works
+(`--competing`), but the bottleneck's queue length and discipline still
+have to be chosen; see "Bandwidth caps and competing traffic" above.
 
-TLS 1.3, the real paths and server load (proposal steps 6 to 8) are
+The phone path, TLS 1.3 and server load (proposal steps 8 to 10) are
 still to do.
