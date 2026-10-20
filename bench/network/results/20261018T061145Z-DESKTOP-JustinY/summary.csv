@@ -1,0 +1,5 @@
+impl,alg,mode,handshakes,failures,public_key_bytes,ciphertext_bytes,app_bytes_c2s,app_bytes_s2c,packets_c2s,packets_s2c,packets_c2s_range,packets_s2c_range,wire_bytes_c2s,wire_bytes_s2c,overhead_bytes,tcp_retrans,median_connect_ms,median_agreed_ms,p95_agreed_ms,median_client_compute_ms,median_server_compute_ms,median_network_ms,problems
+liboqs,ML-KEM-768,ephemeral,200,0,1184,1088,1224,1128,7.0,4.0,7-8,4-5,1694.0,1400.0,742.0,0,20.235727,40.5595525,40.7739354,0.078014,0.0381045,40.435709,
+liboqs,Classic-McEliece-6688128,ephemeral,199,1,1044992,208,1045032,248,729,89,728-733,46-306,1093154,6130,54004,0,20.231807,324.356104,506.4255721,162.205363,0.154208,162.125524,
+openssl,X25519,ephemeral,200,0,32,32,72,72,7.0,4.0,7-8,4-4,542.0,344.0,742.0,0,20.1900525,40.6131925,40.8476921,0.135078,0.117059,40.3455865,
+openssl,ML-KEM-768,ephemeral,200,0,1184,1088,1224,1128,7.0,4.0,7-8,4-4,1694.0,1400.0,742.0,0,20.1976975,40.612568,40.7190615,0.140388,0.090519,40.3664155,
