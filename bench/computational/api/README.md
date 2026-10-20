@@ -98,7 +98,9 @@ whichever was running at the time.
 
 ## Output
 
-`../results/<UTC stamp>-<host>/`:
+`../results/<UTC stamp>-<host>/`. With `--variant icicle` (ML-KEM on
+the GPU), runs go to `../gpu/results/<UTC stamp>-<host>-liboqs/` instead;
+see [`../gpu/README.md`](../gpu/README.md).
 
 | File | Contents |
 | --- | --- |

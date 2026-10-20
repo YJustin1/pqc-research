@@ -36,3 +36,7 @@ papers/pdfs/
 # raw benchmark samples . The summaries
 # next to them in bench/computational/results/<stamp>/ are small and are kept.
 bench/computational/results/*/raw.csv
+bench/computational/gpu/results/*/raw.csv
+# per-handshake network records and packet captures; summaries are kept
+bench/network/results/*/handshakes.csv
+bench/network/results/*/*.pcap

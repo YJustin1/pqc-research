@@ -6,6 +6,8 @@ Everything is built under bench/driver/build/ (gitignored):
 
     liboqs-native/     the liboqs submodule, OQS_OPT_TARGET=auto (AVX2 here)
     liboqs-generic/    the same, OQS_OPT_TARGET=generic (portable C)
+    liboqs-icicle/     native, with ML-KEM on the GPU (OQS_USE_ICICLE=ON)
+    icicle-{src,build,install}/   ICICLE at a pinned commit, for liboqs-icicle
     openssl-<ver>/     a pinned OpenSSL release, checked by SHA-256
     kem_bench-<variant>   timing build
     kem_mem-<variant>     memory build: -DKEM_MEMORY, allocator wrapped
@@ -87,6 +89,9 @@ LIBOQS_OPTIONS = {
 }
 # variant -> OQS_OPT_TARGET
 VARIANTS = {"native": "auto", "generic": "generic"}
+# GPU builds: native, with liboqs' ML-KEM entry points moved onto the GPU.
+# Kept out of VARIANTS so the memory harness's "both" stays the CPU builds.
+GPU_VARIANTS = {"icicle": {"OQS_OPT_TARGET": "auto", "OQS_USE_ICICLE": "ON"}}
 
 
 def liboqs_dir(variant: str) -> Path:
@@ -94,6 +99,8 @@ def liboqs_dir(variant: str) -> Path:
 
 
 def liboqs_options(variant: str) -> dict[str, str]:
+    if variant in GPU_VARIANTS:
+        return {**LIBOQS_OPTIONS, **GPU_VARIANTS[variant]}
     return {**LIBOQS_OPTIONS, "OQS_OPT_TARGET": VARIANTS[variant]}
 
 
@@ -103,13 +110,76 @@ def liboqs_revision() -> str:
 
 def build_liboqs(variant: str) -> None:
     out = liboqs_dir(variant)
+    paths = {}
+    if variant == "icicle":
+        build_icicle()
+        paths = {"CMAKE_PREFIX_PATH": ICICLE_PREFIX, "Taskflow_DIR": TASKFLOW_STUB,
+                 "CMAKE_CUDA_COMPILER": NVCC}
     if not (out / "CMakeCache.txt").exists():
         log(f"[build] configuring liboqs ({variant})")
         run(["cmake", "-S", str(LIBOQS_SRC), "-B", str(out), "-G", "Ninja",
-             *(f"-D{k}={v}" for k, v in liboqs_options(variant).items())],
+             *(f"-D{k}={v}" for k, v in {**liboqs_options(variant), **paths}.items())],
             stdout=subprocess.DEVNULL)
     log(f"[build] liboqs ({variant})")
     run(["cmake", "--build", str(out), "--target", "oqs"], stdout=subprocess.DEVNULL)
+
+
+# ---------- ICICLE (GPU ML-KEM for liboqs-icicle) ----------
+
+ICICLE_REPO = "https://github.com/ingonyama-zk/icicle.git"
+ICICLE_COMMIT = "625532a624e5aaa6e9d31a1c92587f1fcc30dc76"   # main, 2025-08-06
+ICICLE_SRC = BUILD / "icicle-src"
+ICICLE_BUILD = BUILD / "icicle-build"
+ICICLE_PREFIX = BUILD / "icicle-install"
+# The recipe in liboqs' CONFIGURE.md (OQS_USE_ICICLE). The CUDA
+# architecture is left to ICICLE, which compiles for the local GPU.
+ICICLE_OPTIONS = {
+    "CMAKE_BUILD_TYPE": "Release",
+    "CPU_BACKEND": "OFF",
+    "DISABLE_ALL_FEATURES": "ON",
+    "PQC": "ON",
+    "CUDA_PQC_BACKEND": "ON",
+    "ICICLE_STATIC_LINK": "ON",
+    "PQC_PACKAGE": "ON",
+}
+CUDA_HOME = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))
+NVCC = CUDA_HOME / "bin" / "nvcc"
+# icicle_pqc_packageConfig.cmake calls find_dependency(Taskflow), which
+# fails when Taskflow is absent, but no ICICLE target uses it. An empty
+# config file satisfies the call.
+TASKFLOW_STUB = BUILD / "stubs" / "taskflow"
+# Whole-archive, because ICICLE's backend registers itself from static
+# initialisers that nothing else references.
+ICICLE_LIBS = [ICICLE_PREFIX / "lib" / f"lib{name}.a"
+               for name in ("icicle_device", "icicle_pqc", "icicle_backend_cuda_pqc")]
+ICICLE_LINK = ["-Wl,--whole-archive", *map(str, ICICLE_LIBS), "-Wl,--no-whole-archive",
+               f"-L{CUDA_HOME / 'lib64'}", f"-Wl,-rpath,{CUDA_HOME / 'lib64'}",
+               "-lcudart", "-lstdc++", "-lm"]
+
+
+def icicle_revision() -> str:
+    return output_of(["git", "-C", str(ICICLE_SRC), "rev-parse", "HEAD"])
+
+
+def build_icicle() -> None:
+    TASKFLOW_STUB.mkdir(parents=True, exist_ok=True)
+    (TASKFLOW_STUB / "TaskflowConfig.cmake").write_text(
+        "# Empty stub; see TASKFLOW_STUB in bench/driver/kem_build.py.\n")
+    if all(p.exists() for p in ICICLE_LIBS):
+        return
+    if not NVCC.exists():
+        sys.exit(f"ERROR: {NVCC} not found; install the CUDA toolkit or set CUDA_HOME")
+    if not ICICLE_SRC.exists():
+        log(f"[build] cloning {ICICLE_REPO}")
+        run(["git", "clone", "-q", ICICLE_REPO, str(ICICLE_SRC)])
+    run(["git", "-C", str(ICICLE_SRC), "checkout", "-q", ICICLE_COMMIT])
+    log("[build] ICICLE (several minutes)")
+    run(["cmake", "-S", str(ICICLE_SRC / "icicle"), "-B", str(ICICLE_BUILD), "-G", "Ninja",
+         f"-DCMAKE_INSTALL_PREFIX={ICICLE_PREFIX}", f"-DCMAKE_CUDA_COMPILER={NVCC}",
+         *(f"-D{k}={v}" for k, v in ICICLE_OPTIONS.items())],
+        stdout=subprocess.DEVNULL)
+    run(["cmake", "--build", str(ICICLE_BUILD)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    run(["cmake", "--install", str(ICICLE_BUILD)], stdout=subprocess.DEVNULL)
 
 
 # ---------- OpenSSL ----------
@@ -178,9 +248,10 @@ def build_driver(variant: str, memory: bool = False) -> Path:
         return exe
     log(f"[build] {exe.name}")
     extra = ["-DKEM_MEMORY", *MEMORY_WRAP_FLAGS] if memory else []
+    gpu = ICICLE_LINK if variant == "icicle" else []
     run(["cc", *DRIVER_CFLAGS, *extra, "-o", str(exe), str(DRIVER_SRC),
          f"-I{liboqs / 'include'}", f"-I{OPENSSL_PREFIX / 'include'}",
-         *map(str, libs), "-ldl", "-pthread"])
+         *map(str, libs), *gpu, "-ldl", "-pthread"])
     return exe
 
 
@@ -198,9 +269,16 @@ def build_all(variants: list[str], memory: bool = False) -> dict[str, Path]:
 
 def build_description(variants: list[str]) -> dict:
     """What was built, for env.json."""
+    gpu = {}
+    if "icicle" in variants:
+        gpu = {"icicle_revision": icicle_revision(), "icicle_options": ICICLE_OPTIONS,
+               "nvcc": output_of([str(NVCC), "--version"]).splitlines()[-1],
+               "gpu": output_of(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap",
+                                 "--format=csv,noheader"])}
     return {
         "liboqs_revision": liboqs_revision(),
         "liboqs_options": {v: liboqs_options(v) for v in variants},
+        **gpu,
         "openssl_source": {"version": OPENSSL_VERSION, "sha256": OPENSSL_SHA256,
                            "configure": OPENSSL_CONFIGURE},
         "driver_cflags": DRIVER_CFLAGS,

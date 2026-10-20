@@ -10,8 +10,11 @@ load spreads over all algorithms instead of landing on one.
     python3 bench/computational/api/run_bench.py                 # everything
     python3 bench/computational/api/run_bench.py --algs X25519 ML-KEM-512
     python3 bench/computational/api/run_bench.py --build-only
+    python3 bench/computational/api/run_bench.py --variant icicle --impl liboqs \
+        --algs ML-KEM-512 ML-KEM-768 ML-KEM-1024    # ML-KEM on the GPU
 
-Results go to bench/computational/results/<UTC stamp>-<host>/.
+Results go to bench/computational/results/<UTC stamp>-<host>/, or with
+--variant icicle to bench/computational/gpu/results/<UTC stamp>-<host>-liboqs/.
 """
 
 from __future__ import annotations
@@ -32,11 +35,14 @@ from typing import NamedTuple, Sequence
 
 HERE = Path(__file__).resolve().parent            # bench/computational/api
 RESULTS = HERE.parent / "results"
+GPU_RESULTS = HERE.parent / "gpu" / "results"   # for --variant icicle
 sys.path.insert(0, str(HERE.parent.parent / "driver"))
 import kem_build as build  # noqa: E402  (bench/driver/kem_build.py)
 from kem_build import OPS, log, output_of, run  # noqa: E402
 
-VARIANT = "native"   # the timing harness measures liboqs' native build only
+# liboqs build to time: "native" (CPU), or "icicle" (ML-KEM on the GPU,
+# every other set as in native).
+TIMING_VARIANTS = ("native", "icicle")
 
 
 class Sample(NamedTuple):
@@ -56,7 +62,7 @@ class RunOutput(NamedTuple):
 
 def run_driver(impl: str, alg: str, op: str, args: argparse.Namespace) -> RunOutput:
     """Run one kem_bench process and parse what it prints."""
-    cmd = [str(build.driver_path(VARIANT)), "time", impl, alg, op,
+    cmd = [str(build.driver_path(args.variant)), "time", impl, alg, op,
            str(args.max_iters), str(args.max_seconds), str(args.warmup)]
     stdout = run(cmd, capture_output=True, text=True, timeout=1800).stdout
 
@@ -188,8 +194,9 @@ def environment(args: argparse.Namespace) -> dict:
         "cpu": cpu_model(),
         "kernel": platform.release(),
         "compiler": output_of(["cc", "--version"]).splitlines()[0],
-        "libraries": output_of([str(build.driver_path(VARIANT)), "version"]).splitlines(),
-        **build.build_description([VARIANT]),
+        "libraries": output_of([str(build.driver_path(args.variant)), "version"]).splitlines(),
+        "variant": args.variant,
+        **build.build_description([args.variant]),
         "perf_event_paranoid": read_text("/proc/sys/kernel/perf_event_paranoid"),
         "scaling_governor": read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
         "loadavg_start": read_text("/proc/loadavg"),
@@ -228,7 +235,8 @@ def write_markdown(path: Path, rows: list[dict], env: dict) -> None:
         f"# API harness results — {env['host']}",
         "",
         f"CPU: {env['cpu']}. Libraries: {'; '.join(env['libraries'])}. "
-        f"liboqs revision `{env['liboqs_revision']}`.",
+        f"liboqs revision `{env['liboqs_revision']}`, `{env['variant']}` build"
+        + (f"; GPU: {env['gpu']}" if "gpu" in env else "") + ".",
         f"Load average at start / end: `{env['loadavg_start']}` / `{env['loadavg_end']}`.",
         f"perf cycle counter available: {perf}.",
         "",
@@ -259,6 +267,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--warmup", type=float, default=0.1, help="warmup seconds per process")
     ap.add_argument("--algs", nargs="+", help="only these sets (default: all)")
     ap.add_argument("--impl", choices=["liboqs", "openssl"], help="only this implementation")
+    ap.add_argument("--variant", choices=TIMING_VARIANTS, default="native",
+                    help="liboqs build to time (default: native)")
     ap.add_argument("--build-only", action="store_true")
     return ap.parse_args()
 
@@ -266,13 +276,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    build.build_all([VARIANT])
+    build.build_all([args.variant])
     if args.build_only:
         return
 
     combos = select_combos(args)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = RESULTS / f"{stamp}-{socket.gethostname()}"
+    if args.variant == "icicle":
+        out = GPU_RESULTS / f"{stamp}-{socket.gethostname()}-liboqs"
+    else:
+        out = RESULTS / f"{stamp}-{socket.gethostname()}"
     out.mkdir(parents=True)
     env = environment(args)
 
